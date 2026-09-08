@@ -24,6 +24,7 @@ MainWindow::MainWindow()
 
 MainWindow::~MainWindow()
 {
+    delete buffer;
     // 释放内存（暂时空着，等队友的模块完成再补）
 }
 
@@ -119,28 +120,33 @@ void MainWindow::drawButtons()
 // ---------- 绘制编辑区（当前是占位符） ----------
 void MainWindow::drawEditor()
 {
-    // 先画一个白色矩形作为编辑区背景
+    // 画白色背景框（不变）
     setfillcolor(WHITE);
     setlinecolor(BLACK);
     fillrectangle(10, 60, windowWidth - 10, windowHeight - 100);
 
-    // ---------- 等待 B 同学完成 EditorBuffer 后替换此处 ----------
-    // 目前硬编码显示几行示例文字，让界面不那么空
+    // ---------- 以下是替换后的核心绘制代码 ----------
     settextcolor(BLACK);
     settextstyle(18, 0, _T("Consolas"));
 
-    // 显示占位提示
-    outtextxy(20, 70, _T("// 这里将显示代码内容"));
-    outtextxy(20, 95, _T("// 等待 B 同学实现 EditorBuffer 后接入"));
-    outtextxy(20, 120, _T("// 目前是 组长 A 画的骨架占位符"));
+    int lineCount = buffer->getLineCount();
+    for (int i = 0; i < lineCount; i++)
+    {
+        std::string line = buffer->getLine(i);
+        outtextxy(20, 70 + i * 20, line.c_str());
+    }
 
-    // 显示一个模拟光标（闪烁竖线）
+    // 画光标（闪烁竖线）
     static int blink = 0;
     blink++;
-    if (blink % 30 < 15)  // 简单闪烁
+    if (blink % 30 < 15)
     {
+        int cx = buffer->getCursorX();
+        int cy = buffer->getCursorY();
+        int screenX = 20 + cx * 10;   // 每个字符约10像素宽
+        int screenY = 70 + cy * 20;   // 每行20像素高
         setlinecolor(BLACK);
-        line(20, 145, 20, 165);  // 在第二行末尾画竖线
+        line(screenX, screenY, screenX, screenY + 20);
     }
 }
 
@@ -149,7 +155,6 @@ void MainWindow::drawStatusBar()
 {
     int y = windowHeight - 70;
 
-    // 灰色背景条
     setfillcolor(LIGHTGRAY);
     setlinecolor(BLACK);
     fillrectangle(0, y, windowWidth, windowHeight - 40);
@@ -157,9 +162,16 @@ void MainWindow::drawStatusBar()
     settextcolor(BLACK);
     settextstyle(14, 0, _T("宋体"));
 
-    // 显示信息：文件名 | 行:列 | 修改状态
+    // 从buffer读取真实数据
+    int row = buffer->getCursorY() + 1;   // B的是0-based，显示要+1
+    int col = buffer->getCursorX() + 1;
+    const char* dirtyFlag = buffer->isDirty() ? "*" : " ";
+    std::string fname = buffer->getFilePath();
+    if (fname.empty()) fname = "未命名.c";
+
     char status[256];
-    sprintf_s(status, " 未命名.c  |  行:1  列:1  |  已保存");
+    sprintf_s(status, " %s  |  行:%d  列:%d  |  %s", 
+              fname.c_str(), row, col, dirtyFlag);
     outtextxy(10, y + 8, status);
 }
 
@@ -215,13 +227,41 @@ void MainWindow::handleMouseClick(int x, int y)
 // ---------- 处理键盘按键 ----------
 void MainWindow::handleKeyPress(int key)
 {
-    // 当前只是占位，等 B 和 C 同学完成编辑逻辑后接入
-    char msg[256];
-    sprintf_s(msg, "按下了按键: %d (等待B/C同学接入编辑)", key);
-    outputPanelText = msg;
+    // 可打印字符（字母/数字/符号）：直接插入
+    if (key >= 32 && key <= 126)
+    {
+        buffer->insertChar((char)key);
+        return;
+    }
 
-    // 注意：EasyX 的按键码 VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN
-    // 字母直接传 char 即可
+    // 特殊按键
+    switch (key)
+    {
+    case VK_BACK:    // 退格键
+        buffer->deleteChar();
+        break;
+    case VK_DELETE:  // Delete键
+        buffer->deleteForward();
+        break;
+    case VK_RETURN:  // 回车键
+        buffer->enter();
+        break;
+    case VK_LEFT:
+        buffer->moveCursor(-1, 0);
+        break;
+    case VK_RIGHT:
+        buffer->moveCursor(1, 0);
+        break;
+    case VK_UP:
+        buffer->moveCursor(0, -1);
+        break;
+    case VK_DOWN:
+        buffer->moveCursor(0, 1);
+        break;
+    default:
+        // 其他按键（如F1-F12）暂不处理
+        break;
+    }
 }
 
 // ---------- 按钮事件回调（空壳，等待后续填充） ----------
@@ -237,11 +277,36 @@ void MainWindow::onOpenFile()
 
 void MainWindow::onSaveFile()
 {
-    outputPanelText = "保存文件 (等待E同学实现文件管理)";
+    // 1. 从B拿到全部文本
+    std::string content = buffer->saveToString();
+    
+    // 2. 获取保存路径
+    std::string path = buffer->getFilePath();
+    if (path.empty())
+    {
+        path = "temp.c";  // 临时文件名，后面可以加对话框
+        buffer->setFilePath(path);
+    }
+
+    // 3. 写入文件（标准C++方式，不依赖E同学）
+    FILE* fp = fopen(path.c_str(), "w");
+    if (fp)
+    {
+        fwrite(content.c_str(), 1, content.size(), fp);
+        fclose(fp);
+        buffer->setDirty(false);
+        outputPanelText = "保存成功: " + path;
+    }
+    else
+    {
+        outputPanelText = "保存失败！无法创建文件: " + path;
+    }
 }
 
 void MainWindow::onCompile()
 {
+    // 先自动保存，确保磁盘上有最新代码
+    onSaveFile();
     outputPanelText = "编译中... (等待D同学实现编译调度)";
 }
 

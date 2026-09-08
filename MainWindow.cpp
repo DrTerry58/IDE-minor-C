@@ -12,7 +12,7 @@
 // ---------- 构造函数：初始化默认值 ----------
 MainWindow::MainWindow()
     : windowWidth(800), windowHeight(600),
-      buffer(nullptr),      // 等B同学写好了再 new
+      buffer(new EditorBuffer()),     // 等B同学写好了再 new
       fileMgr(nullptr),     // 等E同学写好了再 new
       compiler(nullptr),    // 等D同学写好了再 new
       runtime(nullptr),     // 等D同学写好了再 new

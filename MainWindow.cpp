@@ -7,6 +7,7 @@
 #include "MainWindow.h"
 #include <cstdio>   // 用于 sprintf
 #include <string>
+#include <windows.h>
 
 // ---------- 构造函数：初始化默认值 ----------
 MainWindow::MainWindow()

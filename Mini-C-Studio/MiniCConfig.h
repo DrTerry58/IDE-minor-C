@@ -199,6 +199,57 @@ inline std::string fms(const std::basic_string<TCHAR>& t)
 inline bool isDbcsLead(unsigned char c) { return c >= 0x81 && c <= 0xFE; }
 inline int  charBytes(unsigned char c)  { return isDbcsLead(c) ? 2 : 1; }
 
+// ---------------------------------------------------------------------------
+//  【重要】不要用"单看一个字节"来判断字符边界！
+//  GBK 的尾字节范围是 0x40~0xFE，与首字节 0x81~0xFE 重叠，
+//  所以 isDbcsLead() 对尾字节同样可能返回 true —— 凭单个字节猜一定会出错。
+//  下面三个函数一律【从行首扫描】确定字符边界，是唯一可靠的做法。
+// ---------------------------------------------------------------------------
+
+// 返回下标 idx 所在字符的起始下标（idx 落在字符中间时归到该字符起点）
+inline int charStartAt(const std::string& s, int idx)
+{
+    int n = (int)s.size();
+    if (idx <= 0) return 0;
+    if (idx > n)  idx = n;
+    int i = 0;
+    while (i < idx)
+    {
+        int nb = charBytes((unsigned char)s[i]);
+        if (i + nb > idx) return i;      // idx 落在这个字符的中间
+        i += nb;
+    }
+    return i;
+}
+
+// 返回下标 idx 之前那个字符的起始下标（Backspace / 左箭头用）
+inline int charStartBefore(const std::string& s, int idx)
+{
+    int n = (int)s.size();
+    if (idx <= 0) return 0;
+    if (idx > n)  idx = n;
+    int i = 0, last = 0;
+    while (i < idx)
+    {
+        last = i;
+        int nb = charBytes((unsigned char)s[i]);
+        if (i + nb >= idx) break;        // 这个字符一直延伸到 idx，它就是"前一个字符"
+        i += nb;
+    }
+    return last;
+}
+
+// 返回下标 idx 所在字符的字节数（1 或 2），右箭头 / Delete 用
+inline int charLenAt(const std::string& s, int idx)
+{
+    int n = (int)s.size();
+    if (idx < 0 || idx >= n) return 1;
+    int st = charStartAt(s, idx);
+    int nb = charBytes((unsigned char)s[st]);
+    if (st + nb > n) return 1;           // 行尾残半个字，保守按 1 字节
+    return nb;
+}
+
 // 某个字节下标（std::string 下标）对应的"显示列"（全角算 2 列）
 inline int dispColOfIndex(const std::string& s, int idx)
 {

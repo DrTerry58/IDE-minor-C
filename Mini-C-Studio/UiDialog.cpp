@@ -149,9 +149,18 @@ DlgRet uiMessageBox(int winW, int winH, const Theme& th,
 // ---------------------------------------------------------------------------
 // 输入框（复用 EasyX InputBox，天然支持中文输入法）
 // ---------------------------------------------------------------------------
-bool uiInputBox(const std::string& title, const std::string& prompt,
+bool uiInputBox(int winW, int winH, const Theme& th,
+                const std::string& title, const std::string& prompt,
                 std::string& out, const std::string& defValue)
 {
+    // 修复 T6.7：EasyX 的 InputBox 是原生模态弹窗，但 EasyX 画布仍保留最后一帧，
+    // 菜单/工具栏/编辑器会从弹窗四周露出来。这里在弹窗弹出前先画一层和 uiMessageBox
+    // 一致的网点遮罩，让背景变成干净的暗色面板，弹窗关闭后主循环会重绘整屏恢复正常。
+    setbkmode(TRANSPARENT);
+    setlinecolor(mixColor(th.bg, RGB(0, 0, 0), 0.45));
+    for (int y = 0; y < winH; y += 3) line(0, y, winW, y);
+    FlushBatchDraw();
+
     TCHAR buf[1024] = { 0 };
     if (!defValue.empty())
     {
@@ -177,9 +186,12 @@ bool uiInputBox(const std::string& title, const std::string& prompt,
 // ---------------------------------------------------------------------------
 #define MINIC_USE_SYSFILEDLG  0
 
-bool uiPickPath(const std::string& title, std::string& path, bool forSave)
+bool uiPickPath(int winW, int winH, const Theme& th,
+                const std::string& title, std::string& path, bool forSave)
 {
 #if MINIC_USE_SYSFILEDLG
+    // 系统对话框分支暂未启用，参数预留
+    (void)winW; (void)winH; (void)th;
     TCHAR buf[MAX_PATH] = { 0 };
     OPENFILENAME ofn;
     ZeroMemory(&ofn, sizeof(ofn));
@@ -203,7 +215,7 @@ bool uiPickPath(const std::string& title, std::string& path, bool forSave)
         ? "请输入保存路径（例如 D:\\test\\hello.c）："
         : "请输入要打开的 .c 文件路径：";
     std::string p;
-    if (!uiInputBox(title, tip, p, path)) return false;
+    if (!uiInputBox(winW, winH, th, title, tip, p, path)) return false;
     if (p.empty()) return false;
     path = p;
     return true;

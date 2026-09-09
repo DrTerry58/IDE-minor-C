@@ -1,409 +1,615 @@
-// ============================================================================
+﻿// ============================================================================
 // 文件名：MainWindow.cpp
-// 负责人：组长 A（骨架） + C 同学（绘制与交互）
-//
-// 本文件里 A 原有的函数【签名全部保留】，函数体由 C 重新实现，
-// 用来完成 PPT 52 页的"图形交互与状态反馈模块"。
-// A 的原始实现逐条保存在 《A文件改动对照.md》 中，可随时比对。
+// 职责：主窗口全部实现（布局 / 绘制 / 事件 / 命令）
+// 负责人：C（GUI 界面 + 交互控制）
 // ============================================================================
 
 #include "MainWindow.h"
 #include "UiDialog.h"
-#include "CoreApi.h"
-
-#include <windows.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cctype>
-#include <cmath>
 #include <algorithm>
 
-// 小工具：int -> string（不用非标准的 itoa）
-static std::string itos(int v)
-{
-    char buf[32];
-    sprintf_s(buf, "%d", v);
-    return std::string(buf);
-}
+// ============================================================================
+//  输入法（IME）支持
+//  为什么需要这一段？
+//    EasyX 的消息队列只会把 WM_CHAR 交给 peekmessage，而中文是输入法产生的，
+//    走的是 WM_IME_COMPOSITION / WM_IME_CHAR，EasyX 不会转发 —— 所以中文"打不进去"。
+//  解决办法：
+//    给 EasyX 的窗口装一个窗口子类（SetWindowLongPtr），直接接管 IME 结果串，
+//    转成 GBK 后交给 imeCommit() 插入到当前焦点（编辑器 / 查找 / 替换 / 控制台）。
+// ============================================================================
+#ifdef _MSC_VER
+#  define MINIC_HAS_IMM 1
+#endif
 
-// 判断两个坐标的先后顺序：返回 -1 表示 a<b，0 相等，1 表示 a>b
-static int cmpPos(int ar, int ac, int br, int bc)
-{
-    if (ar != br) return ar < br ? -1 : 1;
-    if (ac != bc) return ac < bc ? -1 : 1;
-    return 0;
+#ifdef MINIC_HAS_IMM
+#  include <imm.h>
+#  pragma comment(lib, "imm32.lib")
+#else
+// 非 MSVC 环境（例如用 MinGW 做语法校验）没有 imm.h，这里给出最小声明
+#  ifndef _IMM_
+#    ifndef GCS_RESULTSTR
+#      define GCS_RESULTSTR 0x0800
+#    endif
+#    ifndef CFS_POINT
+#      define CFS_POINT 0x0002
+#    endif
+DECLARE_HANDLE(HIMC);
+typedef struct tagCOMPOSITIONFORM { DWORD dwStyle; POINT ptCurrentPos; RECT rcArea; } COMPOSITIONFORM, *LPCOMPOSITIONFORM;
+extern "C" {
+HIMC WINAPI ImmGetContext(HWND);
+BOOL WINAPI ImmReleaseContext(HWND, HIMC);
+LONG WINAPI ImmGetCompositionStringW(HIMC, DWORD, LPVOID, DWORD);
+BOOL WINAPI ImmSetCompositionWindow(HIMC, LPCOMPOSITIONFORM);
 }
+#  endif
+#endif
 
-// 把 D 同学返回的 CompileResult 映射成 C 的 UI 状态机 CompileState
-// （D 的类型用 success / errorCount / warningCount 表达，这里转成 C 的枚举）
-static CompileState compileStateOf(const CompileResult& r)
+// ============================================================================
+//  工具函数
+// ============================================================================
+namespace
 {
-    if (r.success)
-        return r.warningCount > 0 ? CS_WARNING : CS_OK;
-    if (r.errorCount > 0)
-        return CS_ERROR;
-    return CS_NOCOMPILER;   // 没成功也没错误：通常是找不到 gcc（D 在 rawOutput 里说明）
+    std::string itos(int v) { char b[32]; sprintf_s(b, "%d", v); return b; }
+
+    int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+    // ---------------- C 语言词法着色 ----------------
+    enum TokType { TOK_PLAIN, TOK_KW, TOK_TYPE, TOK_STR, TOK_CHR,
+                   TOK_COMMENT, TOK_NUM, TOK_PREP, TOK_PUNCT };
+    struct Tok { int b0, b1; TokType t; };
+
+    const char* KW_CTRL[] = { "if","else","for","while","do","switch","case","default",
+                              "break","continue","return","goto","sizeof","typedef",
+                              "static","extern","const","volatile","register","auto","inline" };
+    const char* KW_STRUCT[] = { "struct","union","enum" };
+    const char* KW_TYPE[] = { "void","int","char","float","double","long","short",
+                              "signed","unsigned","_Bool","FILE","size_t" };
+
+    bool inList(const std::string& s, const char** L, int n)
+    {
+        for (int i = 0; i < n; i++) if (s == L[i]) return true;
+        return false;
+    }
+    bool isIdStart(char c) { return isalpha((unsigned char)c) || c == '_'; }
+    bool isIdChar(char c)  { return isalnum((unsigned char)c) || c == '_'; }
+    bool isPunct(char c)   { return strchr("+-*/%=<>!&|^~?:;,.()[]{}", c) != NULL; }
+
+    void pushTok(std::vector<Tok>& v, int a, int b, TokType t)
+    {
+        if (b <= a) return;
+        Tok tk; tk.b0 = a; tk.b1 = b; tk.t = t; v.push_back(tk);
+    }
+
+    // 扫描一行，输出 token；inBlock 表示进入本行时是否处于块注释中
+    void tokenizeLine(const std::string& s, bool inBlock, std::vector<Tok>& out, bool& outBlock)
+    {
+        int i = 0, n = (int)s.size();
+        outBlock = false;
+
+        if (inBlock)
+        {
+            size_t e = s.find("*/");
+            if (e == std::string::npos) { pushTok(out, 0, n, TOK_COMMENT); outBlock = true; return; }
+            pushTok(out, 0, (int)e + 2, TOK_COMMENT);
+            i = (int)e + 2;
+        }
+
+        while (i < n)
+        {
+            char c = s[i];
+            // 行注释
+            if (c == '/' && i + 1 < n && s[i + 1] == '/') { pushTok(out, i, n, TOK_COMMENT); return; }
+            // 块注释
+            if (c == '/' && i + 1 < n && s[i + 1] == '*')
+            {
+                size_t e = s.find("*/", i + 2);
+                if (e == std::string::npos) { pushTok(out, i, n, TOK_COMMENT); outBlock = true; return; }
+                pushTok(out, i, (int)e + 2, TOK_COMMENT);
+                i = (int)e + 2; continue;
+            }
+            // 预处理指令
+            if (c == '#') { pushTok(out, i, n, TOK_PREP); return; }
+            // 字符串
+            if (c == '"')
+            {
+                int j = i + 1;
+                while (j < n && s[j] != '"') { if (s[j] == '\\') j++; j++; }
+                if (j < n) j++;
+                pushTok(out, i, j, TOK_STR); i = j; continue;
+            }
+            // 字符常量
+            if (c == '\'')
+            {
+                int j = i + 1;
+                while (j < n && s[j] != '\'') { if (s[j] == '\\') j++; j++; }
+                if (j < n) j++;
+                pushTok(out, i, j, TOK_CHR); i = j; continue;
+            }
+            // 数字
+            if (isdigit((unsigned char)c) || (c == '.' && i + 1 < n && isdigit((unsigned char)s[i + 1])))
+            {
+                int j = i;
+                while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '.' || s[j] == 'x' ||
+                                 s[j] == 'X' || s[j] == '+' || s[j] == '-')) j++;
+                pushTok(out, i, j, TOK_NUM); i = j; continue;
+            }
+            // 标识符 / 关键字
+            if (isIdStart(c))
+            {
+                int j = i;
+                while (j < n && isIdChar(s[j])) j++;
+                std::string w = s.substr(i, j - i);
+                TokType t = TOK_PLAIN;
+                if (inList(w, KW_CTRL,  sizeof(KW_CTRL)  / sizeof(char*))) t = TOK_KW;
+                else if (inList(w, KW_TYPE, sizeof(KW_TYPE) / sizeof(char*))) t = TOK_TYPE;
+                else if (inList(w, KW_STRUCT, sizeof(KW_STRUCT) / sizeof(char*))) t = TOK_TYPE;
+                pushTok(out, i, j, t); i = j; continue;
+            }
+            // 运算符
+            if (isPunct(c)) { pushTok(out, i, i + 1, TOK_PUNCT); i++; continue; }
+            // 其它（空格、中文等）
+            {
+                int nb = charBytes((unsigned char)c);
+                pushTok(out, i, i + nb, TOK_PLAIN);
+                i += nb;
+            }
+        }
+    }
+
+    COLORREF tokColor(const Theme& th, TokType t)
+    {
+        switch (t)
+        {
+        case TOK_KW:      return th.kw;
+        case TOK_TYPE:    return th.kwType;
+        case TOK_STR:
+        case TOK_CHR:     return th.str;
+        case TOK_COMMENT: return th.comment;
+        case TOK_NUM:     return th.num;
+        case TOK_PREP:    return th.prep;
+        case TOK_PUNCT:   return th.punct;
+        default:          return th.ident;
+        }
+    }
+
+    // 大小写不敏感查找
+    std::string lower(const std::string& s)
+    {
+        std::string r = s;
+        for (size_t i = 0; i < r.size(); i++)
+            if (r[i] >= 'A' && r[i] <= 'Z') r[i] += 32;
+        return r;
+    }
+    int findInLine(const std::string& line, const std::string& pat, int from, bool cs)
+    {
+        if (pat.empty()) return -1;
+        std::string L = cs ? line : lower(line);
+        std::string P = cs ? pat : lower(pat);
+        if (from < 0) from = 0;
+        size_t p = L.find(P, (size_t)from);
+        return p == std::string::npos ? -1 : (int)p;
+    }
+    int rfindInLine(const std::string& line, const std::string& pat, int from, bool cs)
+    {
+        if (pat.empty()) return -1;
+        std::string L = cs ? line : lower(line);
+        std::string P = cs ? pat : lower(pat);
+        size_t f = (from < 0 || (size_t)from >= L.size()) ? std::string::npos : (size_t)from;
+        size_t p = L.rfind(P, f);
+        return p == std::string::npos ? -1 : (int)p;
+    }
+
+    // 裁剪区域守卫（EasyX setcliprgn 的 RAII 封装）
+    struct ClipGuard
+    {
+        HRGN r;
+        ClipGuard(const Rect& rc)
+        {
+            r = CreateRectRgn(rc.x1, rc.y1, rc.x2, rc.y2);
+            setcliprgn(r);
+        }
+        ~ClipGuard() { setcliprgn(NULL); DeleteObject(r); }
+    };
 }
 
 // ============================================================================
-//  构造 / 析构（A 原有）
+//  构造函数
 // ============================================================================
 MainWindow::MainWindow()
-    : windowWidth(800), windowHeight(600),
-      buffer(new EditorBuffer()),
-      fileMgr(nullptr),
-      compiler(nullptr),
-      runtime(nullptr),
-      outputPanelText("欢迎使用 Mini-C-Studio！"),
-      isCompiling(false),
-      m_dark(false), th(&themeLight()),
-      m_charW(8), m_tick(0), m_mouseX(-1), m_mouseY(-1),
+    : m_w(0), m_h(0), m_running(true), m_dark(false), th(&themeLight()),
+      m_charW(9), m_tick(0), m_mouseX(-1), m_mouseY(-1),
       m_topLine(0), m_leftCol(0),
       m_selActive(false), m_selR1(0), m_selC1(0), m_selR2(0), m_selC2(0),
       m_anchorR(0), m_anchorC(0), m_dragging(false),
-      m_dragV(false), m_dragH(false), m_dragInBottom(false), m_dragStart(0),
-      m_statusUntil(0),
-      m_focus(FOCUS_EDITOR), m_wantCol(-1),
-      m_blockTopCache(0), m_blockValCache(false), m_blockFrameCache(-1),
+      m_dragV(false), m_dragH(false), m_dragStart(0),
+      m_imeGuardUntil(0),
+      m_focus(FOCUS_EDITOR), m_blockTopCache(-1), m_blockValCache(false), m_blockFrameCache(-999),
       m_openMenu(-1), m_hoverMenu(-1), m_hoverItem(-1), m_hoverTool(-1),
-      m_bottomTab(0), m_diagTop(0), m_consoleTop(0), m_progRunning(false),
+      m_bottomTab(1), m_diagTop(0), m_consoleTop(0), m_progRunning(false),
       m_findVisible(false), m_caseSensitive(false),
       m_hasMatch(false), m_matchR(0), m_matchC(0), m_matchLen(0),
-      m_compileState(CS_NONE), m_statusColor(RGB(0, 0, 0))
+      m_compileState(CS_NONE), m_compiling(false),
+      m_statusMsg("就绪"), m_statusColor(themeLight().dim)
 {
     buildMenus();
-
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "新建"; m_tools.back().cmd = CMD_FILE_NEW;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "打开"; m_tools.back().cmd = CMD_FILE_OPEN;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "保存"; m_tools.back().cmd = CMD_FILE_SAVE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "|";    m_tools.back().cmd = CMD_NONE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "撤销"; m_tools.back().cmd = CMD_EDIT_UNDO;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "重做"; m_tools.back().cmd = CMD_EDIT_REDO;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "|";    m_tools.back().cmd = CMD_NONE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "剪切"; m_tools.back().cmd = CMD_EDIT_CUT;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "复制"; m_tools.back().cmd = CMD_EDIT_COPY;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "粘贴"; m_tools.back().cmd = CMD_EDIT_PASTE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "|";    m_tools.back().cmd = CMD_NONE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "查找"; m_tools.back().cmd = CMD_FIND;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "替换"; m_tools.back().cmd = CMD_REPLACE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "|";    m_tools.back().cmd = CMD_NONE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "编译"; m_tools.back().cmd = CMD_COMPILE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "运行"; m_tools.back().cmd = CMD_RUN;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "停止"; m_tools.back().cmd = CMD_STOP;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "|";    m_tools.back().cmd = CMD_NONE;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "主题"; m_tools.back().cmd = CMD_THEME;
-    m_tools.push_back(ToolBtn()); m_tools.back().label = "关于"; m_tools.back().cmd = CMD_ABOUT;
-
-    loadWelcomeContent();
 }
 
-MainWindow::~MainWindow()
+MainWindow::~MainWindow() {}
+
+// ============================================================================
+//  输入法（IME）支持：让中文能够输入
+// ============================================================================
+MainWindow* MainWindow::s_self    = 0;
+WNDPROC     MainWindow::s_oldProc = 0;
+
+LRESULT CALLBACK MainWindow::imeWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    delete buffer;
-    // fileMgr / compiler / runtime 目前是 nullptr，等 E/D 交付后由 A 决定何时 new/delete
+    // ---- 输入法结果串（用户选词/敲空格后提交） ----
+    if (uMsg == WM_IME_COMPOSITION)
+    {
+        if (lParam & GCS_RESULTSTR)
+        {
+            HIMC hImc = ImmGetContext(hWnd);
+            if (hImc)
+            {
+                int len = ImmGetCompositionStringW(hImc, GCS_RESULTSTR, NULL, 0);
+                if (len > 0)
+                {
+                    std::wstring ws((size_t)(len / 2), L'\0');
+                    ImmGetCompositionStringW(hImc, GCS_RESULTSTR, &ws[0], (DWORD)len);
+                    ImmReleaseContext(hWnd, hImc);
+                    if (s_self) s_self->imeCommit(w2s(ws));   // UTF-16 -> GBK
+                }
+                else
+                {
+                    ImmReleaseContext(hWnd, hImc);
+                }
+            }
+            return 0;      // 不再交给 DefWindowProc，避免额外生成 WM_CHAR 造成重复输入
+        }
+        return 0;
+    }
+
+    // ---- 兜底：个别输入法只发 WM_IME_CHAR，由上面的 COMPOSITION 分支统一处理 ----
+    if (uMsg == WM_IME_CHAR) return 0;
+
+    // ---- 输入法上下文建立时，把候选窗挪到光标处 ----
+    if (uMsg == WM_IME_SETCONTEXT && wParam)
+    {
+        if (s_self) s_self->updateImePosition();
+    }
+
+    return CallWindowProc(s_oldProc, hWnd, uMsg, wParam, lParam);
 }
 
-// ============================================================================
-//  菜单结构
-// ============================================================================
+void MainWindow::imeCommit(const std::string& gbk)
+{
+    if (gbk.empty()) return;
+
+    if      (m_focus == FOCUS_FIND)    { m_findText    += gbk; return; }
+    else if (m_focus == FOCUS_REPLACE) { m_replaceText += gbk; return; }
+    else if (m_focus == FOCUS_CONSOLE) { m_inputLine   += gbk; return; }
+
+    // 编辑器
+    if (m_selActive) deleteSelection();
+    CoreApi::inst().bufInsertString(gbk);
+    scrollToCursor();
+    updateImePosition();
+    m_imeGuardUntil = GetTickCount() + 120;   // 防止同一批字符被 WM_CHAR 再插一次
+}
+
+void MainWindow::updateImePosition()
+{
+    HIMC hImc = ImmGetContext(GetHWnd());
+    if (!hImc) return;
+
+    CoreApi& api = CoreApi::inst();
+    int row  = api.bufRow();
+    int dcol = dispColOfIndex(api.bufGetLine(row), api.bufCol());
+    int x    = rText().x1 + (dcol - m_leftCol) * m_charW;
+    int y    = rText().y1 + (row - m_topLine) * UI_LINE_H + UI_LINE_H;
+
+    COMPOSITIONFORM cf;
+    ZeroMemory(&cf, sizeof(cf));
+    cf.dwStyle        = CFS_POINT;
+    cf.ptCurrentPos.x = x;
+    cf.ptCurrentPos.y = y;
+    ImmSetCompositionWindow(hImc, &cf);
+    ImmReleaseContext(GetHWnd(), hImc);
+}
+
 void MainWindow::buildMenus()
 {
-    m_menus.clear();
-
+    // ---------------- 菜单栏 ----------------
     MenuDef m;
-    m.title = "文件"; m.items.clear();
-    m.items.push_back(MenuItem()); m.items.back().label = "新建";         m.items.back().cmd = CMD_FILE_NEW;   m.items.back().hot = "Ctrl+N";
-    m.items.push_back(MenuItem()); m.items.back().label = "打开...";      m.items.back().cmd = CMD_FILE_OPEN;  m.items.back().hot = "Ctrl+O";
-    m.items.push_back(MenuItem()); m.items.back().label = "保存";         m.items.back().cmd = CMD_FILE_SAVE;  m.items.back().hot = "Ctrl+S";
-    m.items.push_back(MenuItem()); m.items.back().label = "另存为...";    m.items.back().cmd = CMD_FILE_SAVEAS;m.items.back().hot = "Ctrl+Shift+S";
-    m.items.push_back(MenuItem()); m.items.back().label = "退出";         m.items.back().cmd = CMD_EXIT;       m.items.back().hot = "Alt+F4";
+    m.title = "文件(F)"; m.items.clear();
+    m.items.push_back(MenuItem{ "新建",         CMD_FILE_NEW,   "Ctrl+N" });
+    m.items.push_back(MenuItem{ "打开...",      CMD_FILE_OPEN,  "Ctrl+O" });
+    m.items.push_back(MenuItem{ "保存",         CMD_FILE_SAVE,  "Ctrl+S" });
+    m.items.push_back(MenuItem{ "另存为...",    CMD_FILE_SAVEAS,"Ctrl+Shift+S" });
+    m.items.push_back(MenuItem{ "关闭文档",     CMD_FILE_CLOSE, "Ctrl+W" });
+    m.items.push_back(MenuItem{ "退出",         CMD_EXIT,       "Alt+F4" });
     m_menus.push_back(m);
 
-    m.title = "编辑"; m.items.clear();
-    m.items.push_back(MenuItem()); m.items.back().label = "撤销";   m.items.back().cmd = CMD_EDIT_UNDO;   m.items.back().hot = "Ctrl+Z";
-    m.items.push_back(MenuItem()); m.items.back().label = "重做";   m.items.back().cmd = CMD_EDIT_REDO;   m.items.back().hot = "Ctrl+Y";
-    m.items.push_back(MenuItem()); m.items.back().label = "剪切";   m.items.back().cmd = CMD_EDIT_CUT;    m.items.back().hot = "Ctrl+X";
-    m.items.push_back(MenuItem()); m.items.back().label = "复制";   m.items.back().cmd = CMD_EDIT_COPY;   m.items.back().hot = "Ctrl+C";
-    m.items.push_back(MenuItem()); m.items.back().label = "粘贴";   m.items.back().cmd = CMD_EDIT_PASTE;  m.items.back().hot = "Ctrl+V";
-    m.items.push_back(MenuItem()); m.items.back().label = "全选";   m.items.back().cmd = CMD_EDIT_SELALL; m.items.back().hot = "Ctrl+A";
+    m.title = "编辑(E)"; m.items.clear();
+    m.items.push_back(MenuItem{ "撤销",         CMD_EDIT_UNDO,   "Ctrl+Z" });
+    m.items.push_back(MenuItem{ "重做",         CMD_EDIT_REDO,   "Ctrl+Y" });
+    m.items.push_back(MenuItem{ "剪切",         CMD_EDIT_CUT,    "Ctrl+X" });
+    m.items.push_back(MenuItem{ "复制",         CMD_EDIT_COPY,   "Ctrl+C" });
+    m.items.push_back(MenuItem{ "粘贴",         CMD_EDIT_PASTE,  "Ctrl+V" });
+    m.items.push_back(MenuItem{ "全选",         CMD_EDIT_SELALL, "Ctrl+A" });
     m_menus.push_back(m);
 
-    m.title = "查找"; m.items.clear();
-    m.items.push_back(MenuItem()); m.items.back().label = "查找";       m.items.back().cmd = CMD_FIND;         m.items.back().hot = "Ctrl+F";
-    m.items.push_back(MenuItem()); m.items.back().label = "替换";       m.items.back().cmd = CMD_REPLACE;      m.items.back().hot = "Ctrl+H";
-    m.items.push_back(MenuItem()); m.items.back().label = "查找下一个"; m.items.back().cmd = CMD_FIND_NEXT;    m.items.back().hot = "F3";
-    m.items.push_back(MenuItem()); m.items.back().label = "查找上一个"; m.items.back().cmd = CMD_FIND_PREV;    m.items.back().hot = "Shift+F3";
-    m.items.push_back(MenuItem()); m.items.back().label = "替换一处";   m.items.back().cmd = CMD_REPLACE_ONE;  m.items.back().hot = "";
-    m.items.push_back(MenuItem()); m.items.back().label = "全部替换";   m.items.back().cmd = CMD_REPLACE_ALL;  m.items.back().hot = "Ctrl+Shift+H";
+    m.title = "查找(S)"; m.items.clear();
+    m.items.push_back(MenuItem{ "查找...",      CMD_FIND,        "Ctrl+F" });
+    m.items.push_back(MenuItem{ "替换...",      CMD_REPLACE,     "Ctrl+H" });
+    m.items.push_back(MenuItem{ "查找下一个",   CMD_FIND_NEXT,   "F3" });
+    m.items.push_back(MenuItem{ "查找上一个",   CMD_FIND_PREV,   "Shift+F3" });
+    m.items.push_back(MenuItem{ "替换当前",     CMD_REPLACE_ONE, "F4" });
+    m.items.push_back(MenuItem{ "全部替换",     CMD_REPLACE_ALL, "Ctrl+Shift+R" });
     m_menus.push_back(m);
 
-    m.title = "编译"; m.items.clear();
-    m.items.push_back(MenuItem()); m.items.back().label = "编译";        m.items.back().cmd = CMD_COMPILE;      m.items.back().hot = "F9";
-    m.items.push_back(MenuItem()); m.items.back().label = "运行";        m.items.back().cmd = CMD_RUN;          m.items.back().hot = "F5";
-    m.items.push_back(MenuItem()); m.items.back().label = "编译并运行";  m.items.back().cmd = CMD_COMPILE_RUN;  m.items.back().hot = "Ctrl+F5";
-    m.items.push_back(MenuItem()); m.items.back().label = "停止";        m.items.back().cmd = CMD_STOP;         m.items.back().hot = "";
+    m.title = "编译(C)"; m.items.clear();
+    m.items.push_back(MenuItem{ "编译",         CMD_COMPILE,     "F7" });
+    m.items.push_back(MenuItem{ "运行",         CMD_RUN,         "F5" });
+    m.items.push_back(MenuItem{ "编译并运行",   CMD_COMPILE_RUN, "Ctrl+F5" });
+    m.items.push_back(MenuItem{ "停止运行",     CMD_STOP,        "Ctrl+Break" });
     m_menus.push_back(m);
 
-    m.title = "视图"; m.items.clear();
-    m.items.push_back(MenuItem()); m.items.back().label = "切换亮/暗主题"; m.items.back().cmd = CMD_THEME; m.items.back().hot = "";
+    m.title = "视图(V)"; m.items.clear();
+    m.items.push_back(MenuItem{ "切换亮/暗主题", CMD_THEME,      "Ctrl+T" });
     m_menus.push_back(m);
 
-    m.title = "帮助"; m.items.clear();
-    m.items.push_back(MenuItem()); m.items.back().label = "关于 Mini-C Studio"; m.items.back().cmd = CMD_ABOUT; m.items.back().hot = "";
+    m.title = "帮助(H)"; m.items.clear();
+    m.items.push_back(MenuItem{ "关于 Mini-C Studio", CMD_ABOUT, "F1" });
     m_menus.push_back(m);
+
+    // ---------------- 工具栏 ----------------
+    m_tools.push_back(ToolBtn{ "新建",     CMD_FILE_NEW });
+    m_tools.push_back(ToolBtn{ "打开",     CMD_FILE_OPEN });
+    m_tools.push_back(ToolBtn{ "保存",     CMD_FILE_SAVE });
+    m_tools.push_back(ToolBtn{ "另存为",   CMD_FILE_SAVEAS });
+    m_tools.push_back(ToolBtn{ "",         CMD_NONE });      // 分隔符
+    m_tools.push_back(ToolBtn{ "撤销",     CMD_EDIT_UNDO });
+    m_tools.push_back(ToolBtn{ "重做",     CMD_EDIT_REDO });
+    m_tools.push_back(ToolBtn{ "剪切",     CMD_EDIT_CUT });
+    m_tools.push_back(ToolBtn{ "复制",     CMD_EDIT_COPY });
+    m_tools.push_back(ToolBtn{ "粘贴",     CMD_EDIT_PASTE });
+    m_tools.push_back(ToolBtn{ "",         CMD_NONE });
+    m_tools.push_back(ToolBtn{ "查找",     CMD_FIND });
+    m_tools.push_back(ToolBtn{ "替换",     CMD_REPLACE });
+    m_tools.push_back(ToolBtn{ "",         CMD_NONE });
+    m_tools.push_back(ToolBtn{ "编译",     CMD_COMPILE });
+    m_tools.push_back(ToolBtn{ "运行",     CMD_RUN });
+    m_tools.push_back(ToolBtn{ "编译运行", CMD_COMPILE_RUN });
+    m_tools.push_back(ToolBtn{ "停止",     CMD_STOP });
+    m_tools.push_back(ToolBtn{ "",         CMD_NONE });
+    m_tools.push_back(ToolBtn{ "主题",     CMD_THEME });
+    m_tools.push_back(ToolBtn{ "关于",     CMD_ABOUT });
 }
 
-// 启动时给一段示例代码，方便直接看到行号 / 高亮 / 光标效果
+// ============================================================================
+//  初始化窗口
+// ============================================================================
+bool MainWindow::initWindow(int w, int h)
+{
+    m_w = w; m_h = h;
+    initgraph(w, h, EW_SHOWCONSOLE);
+    SetWindowText(GetHWnd(), _T("Mini-C Studio - C 语言集成开发环境"));
+
+    // 计算等宽字符宽度
+    settextstyle(UI_FONT_H, 0, _T("Consolas"));
+    m_charW = textwidth(_T("M"));
+    if (m_charW <= 0) m_charW = 9;
+
+    setbkmode(TRANSPARENT);
+    setbkcolor(th->bg);
+    cleardevice();
+    BeginBatchDraw();
+
+    // 安装窗口子类：接管 IME，让中文可以输入（必须在 initgraph 之后）
+    s_self    = this;
+    s_oldProc = (WNDPROC)(LONG_PTR)SetWindowLongPtr(GetHWnd(), GWLP_WNDPROC,
+                                                    (LONG_PTR)imeWndProc);
+
+    loadWelcomeContent();
+    return true;
+}
+
 void MainWindow::loadWelcomeContent()
 {
     std::string demo =
-        "#include <stdio.h>\r\n"
-        "\r\n"
-        "// Mini-C Studio —— 图形交互与状态反馈模块（角色 C）\r\n"
-        "int add(int a, int b)\r\n"
-        "{\r\n"
-        "    int sum = a + b;   /* 试试在这里打字 */\r\n"
-        "    return sum;\r\n"
-        "}\r\n"
-        "\r\n"
-        "int main(void)\r\n"
-        "{\r\n"
-        "    printf(\"1 + 2 = %d\\n\", add(1, 2));\r\n"
-        "    return 0;\r\n"
-        "}\r\n";
-    buffer->loadFromString(demo);
-    buffer->setDirty(false);
-    outputPanelText = "欢迎使用 Mini-C Studio！F9 编译，F5 运行。";
+        "#include <stdio.h>\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    printf(\"Hello, Mini-C Studio!\\n\");\n"
+        "    return 0;\n"
+        "}\n";
+    CoreApi::inst().bufLoad(demo);
+    CoreApi::inst().bufSetDirty(false);
+    appendConsole("Mini-C Studio " + std::string(MINIC_VERSION) + " 已启动。\n"
+                  "提示：F7 编译，F5 运行，Ctrl+F 查找。");
 }
 
 // ============================================================================
-//  初始化窗口（A 原有，C 追加了自适应尺寸与双缓冲）
+//  主循环
 // ============================================================================
-void MainWindow::initWindow()
+void MainWindow::run()
 {
-    // --- C 追加：按屏幕大小选一个合适的窗口尺寸（A 原来固定 800x600）---
-    int sw = GetSystemMetrics(SM_CXSCREEN);
-    int sh = GetSystemMetrics(SM_CYSCREEN);
-    windowWidth  = MINIC_DEF_W;
-    windowHeight = MINIC_DEF_H;
-    if (windowWidth  > sw - 80) windowWidth  = sw - 80;
-    if (windowHeight > sh - 80) windowHeight = sh - 80;
-    if (windowWidth  < 640) windowWidth  = 640;
-    if (windowHeight < 480) windowHeight = 480;
-
-    // --- A 原有 ---
-    initgraph(windowWidth, windowHeight, EW_SHOWCONSOLE);
-    SetConsoleTitle(_T("Mini-C-Studio - 调试控制台"));   // A 原有（加了 _T，兼容 Unicode 工程）
-
-    // --- C 追加：双缓冲，消除闪烁 ---
-    BeginBatchDraw();
-    setbkmode(TRANSPARENT);
-
-    // 量一下等宽字体单个字符的宽度（后面所有列 → 像素换算都用它）
-    settextstyle(UI_FONT_H, 0, _T("Consolas"));
-    m_charW = textwidth(_T("M"));
-    if (m_charW <= 0) m_charW = 8;
-
-    // 启动时检测编译器，缺 gcc 就先在控制台提示一句（不弹窗，不打断启动）
-    if (!CoreApi::inst().compilerAvailable())
-        appendConsole("[提示] 未检测到 gcc 编译器，暂时无法编译。请安装 MinGW 并加入 PATH。");
-}
-
-// ============================================================================
-//  主消息循环（A 原有框架，C 追加了鼠标移动/抬起/滚轮与字符输入）
-// ============================================================================
-void MainWindow::mainLoop()
-{
-    ExMessage msg;
-
-    while (true)
+    while (m_running)
     {
-        while (peekmessage(&msg, EX_MOUSE | EX_KEY | EX_CHAR))
-        {
-            switch (msg.message)
-            {
-            case WM_LBUTTONDOWN:
-                handleMouseClick(msg.x, msg.y);
-                break;
-            case WM_LBUTTONUP:                       // C 追加
-                onMouseUp(msg.x, msg.y);
-                break;
-            case WM_MOUSEMOVE:                       // C 追加
-                onMouseMove(msg.x, msg.y);
-                break;
-            case WM_MOUSEWHEEL:                      // C 追加
-                onWheel(msg.wheel);
-                break;
-            case WM_KEYDOWN:                         // A 原有：只留这一个入口
-                handleKeyPress(msg.vkcode);
-                break;
-            case WM_CHAR:                            // C 追加：可打印字符 / 中文
-                onCharInput((unsigned int)msg.ch);
-                break;
-            default:
-                break;
-            }
-        }
+        pumpMessages();
+        update();
+        render();
+        Sleep(16);
+        m_tick++;
+    }
+    EndBatchDraw();
+}
 
-        drawAll();
-
-        // 运行中的程序：每帧轮询一次输出
-        if (m_progRunning)
+void MainWindow::update()
+{
+    CoreApi& api = CoreApi::inst();
+    clampScroll();
+    if (m_progRunning)
+    {
+        std::string out; int code = 0; bool fin = false;
+        if (api.runPoll(out, code, fin))
         {
-            std::string chunk; int code = 0; bool fin = false;
-            if (CoreApi::inst().runPoll(chunk, code, fin))
+            if (!out.empty()) appendConsole(out);
+            if (fin)
             {
-                if (!chunk.empty()) appendConsole(chunk);
-                if (fin)
+                m_progRunning = false;
+                if (code == 0)
                 {
-                    m_progRunning = false;
-                    if (code == 0) setStatus("程序运行结束，退出码 0", th->ok);
-                    else           setStatus("程序异常结束，退出码 " + itos(code), th->err);
+                    appendConsole("\n[程序已结束，退出码 0]");
+                    setStatus("程序运行结束（正常）", th->ok);
+                }
+                else
+                {
+                    appendConsole("\n[程序异常结束，退出码 " + itos(code) + "]");
+                    setStatus("程序异常结束，退出码 " + itos(code), th->err);
+                    uiAlert(m_w, m_h, *th, "运行时异常",
+                            "程序以非零退出码结束（" + itos(code) + "）。\n"
+                            "可能原因：运行时错误、崩溃或访问非法内存。\n"
+                            "详细信息见控制台面板。");
                 }
             }
         }
-
-        m_tick++;
-        FlushBatchDraw();
-        Sleep(16);
     }
 }
 
 // ============================================================================
-//  绘制全部界面（A 原有，函数体重写）
+//  布局（绘制与命中测试共用同一套坐标）
 // ============================================================================
-void MainWindow::drawAll()
-{
-    setbkcolor(th->bg);
-    cleardevice();
-    setbkmode(TRANSPARENT);
-
-    drawEditor();      // 编辑区（含行号、高亮、光标、滚动条）
-    drawFindBar();     // 查找/替换条
-    drawBottom();      // 底部诊断 / 控制台面板
-    drawStatusBar();   // 状态栏
-    drawToolbar();     // 工具栏
-    drawMenuBar();     // 菜单栏（最上层）
-    drawDropdown();    // 展开的菜单
-}
-
-// ============================================================================
-//  布局：所有矩形都在这里算，绘制与鼠标命中测试共用同一份
-// ============================================================================
-Rect MainWindow::rMenu()   const { return Rect(0, 0, windowWidth, UI_MENU_H); }
-Rect MainWindow::rTool()   const { return Rect(0, UI_MENU_H, windowWidth, UI_MENU_H + UI_TOOL_H); }
-Rect MainWindow::rStatus() const { return Rect(0, windowHeight - UI_STATUS_H, windowWidth, windowHeight); }
-Rect MainWindow::rBottom() const
-{
-    return Rect(0, windowHeight - UI_STATUS_H - UI_BOTTOM_H,
-                windowWidth, windowHeight - UI_STATUS_H);
-}
-Rect MainWindow::rFindBar() const
-{
-    int y = rTool().y2;
-    return Rect(0, y, windowWidth, y + UI_FINDBAR_H);
-}
-Rect MainWindow::rEdit() const
-{
-    int top = m_findVisible ? rFindBar().y2 : rTool().y2;
-    return Rect(0, top, windowWidth, rBottom().y1);
-}
-Rect MainWindow::rGutter()  const { Rect e = rEdit(); return Rect(e.x1, e.y1, e.x1 + UI_GUTTER_W, e.y2); }
-Rect MainWindow::rVScroll() const
+Rect MainWindow::rMenu()   const { return Rect(0, 0, m_w, UI_MENU_H); }
+Rect MainWindow::rTool()   const { return Rect(0, UI_MENU_H, m_w, UI_MENU_H + UI_TOOL_H); }
+Rect MainWindow::rEdit()   const { return Rect(0, UI_MENU_H + UI_TOOL_H, m_w, m_h - UI_STATUS_H - UI_BOTTOM_H); }
+Rect MainWindow::rBottom() const { return Rect(0, m_h - UI_STATUS_H - UI_BOTTOM_H, m_w, m_h - UI_STATUS_H); }
+Rect MainWindow::rStatus() const { return Rect(0, m_h - UI_STATUS_H, m_w, m_h); }
+Rect MainWindow::rGutter() const { Rect e = rEdit(); return Rect(e.x1, e.y1, e.x1 + UI_GUTTER_W, e.y2); }
+Rect MainWindow::rText()   const
 {
     Rect e = rEdit();
-    return Rect(e.x2 - UI_SCROLL_W, e.y1, e.x2, e.y2 - UI_SCROLL_W);
+    int top = e.y1 + (m_findVisible ? UI_FINDBAR_H : 0);
+    return Rect(e.x1 + UI_GUTTER_W, top, e.x2 - UI_SCROLL_W, e.y2 - UI_SCROLL_W);
 }
-Rect MainWindow::rHScroll() const
+Rect MainWindow::rVScroll() const { Rect e = rEdit(); return Rect(e.x2 - UI_SCROLL_W, e.y1, e.x2, e.y2 - UI_SCROLL_W); }
+Rect MainWindow::rHScroll() const { Rect e = rEdit(); return Rect(e.x1, e.y2 - UI_SCROLL_W, e.x2 - UI_SCROLL_W, e.y2); }
+
+// 最长行的显示列数 —— 水平滚动条的 total（全角算 2 列）
+int MainWindow::maxLineCols()
 {
-    Rect e = rEdit();
-    return Rect(e.x1, e.y2 - UI_SCROLL_W, e.x2 - UI_SCROLL_W, e.y2);
+    CoreApi& api = CoreApi::inst();
+    int total = api.bufLineCount();
+    int maxw = 0;
+    for (int i = 0; i < total; i++)
+    {
+        int wd = dispWidth(api.bufGetLine(i));
+        if (wd > maxw) maxw = wd;
+    }
+    return maxw;
 }
-Rect MainWindow::rText() const
+
+// 编辑区一屏能显示的列数 —— 水平滚动条的 page
+int MainWindow::hPageCols()
 {
-    return Rect(rGutter().x2, rEdit().y1, rVScroll().x1, rHScroll().y1);
+    int page = rText().w() / (m_charW > 0 ? m_charW : 9);
+    if (page < 1) page = 1;
+    return page;
 }
-Rect MainWindow::rBottomTabs() const
+
+// 把两个滚动偏移钳回合法范围。
+// 没有它的话：删掉长行 / 删掉若干行之后，旧的偏移会残留成越界值，
+// 表现为"内容能被推到看不见的地方"或"底部露出空白"。
+void MainWindow::clampScroll()
 {
-    Rect b = rBottom();
-    return Rect(b.x1, b.y1, b.x2, b.y1 + UI_TAB_H);
+    CoreApi& api = CoreApi::inst();
+    int page = visibleLines();
+    int maxTop = api.bufLineCount() - page;
+    if (maxTop < 0) maxTop = 0;
+    m_topLine = clampi(m_topLine, 0, maxTop);
+
+    int maxLeft = maxLineCols() - hPageCols();
+    if (maxLeft < 0) maxLeft = 0;
+    m_leftCol = clampi(m_leftCol, 0, maxLeft);
 }
-Rect MainWindow::rBottomScroll() const
-{
-    Rect b = rBottom();
-    return Rect(b.x2 - UI_SCROLL_W, rBottomTabs().y2, b.x2, b.y2);
-}
-Rect MainWindow::rBottomBody() const
-{
-    return Rect(rBottom().x1, rBottomTabs().y2, rBottomScroll().x1, rBottom().y2);
-}
-Rect MainWindow::rConsoleInput() const
+Rect MainWindow::rFindBar() const { Rect e = rEdit(); return Rect(e.x1, e.y1, e.x2, e.y1 + UI_FINDBAR_H); }
+Rect MainWindow::rBottomTabs()   const { Rect b = rBottom(); return Rect(b.x1, b.y1, b.x2, b.y1 + UI_TAB_H); }
+Rect MainWindow::rBottomBody()   const { Rect b = rBottom(); return Rect(b.x1 + 1, b.y1 + UI_TAB_H, b.x2 - UI_SCROLL_W, b.y2 - 1); }
+Rect MainWindow::rBottomScroll() const { Rect b = rBottom(); return Rect(b.x2 - UI_SCROLL_W, b.y1 + UI_TAB_H, b.x2, b.y2 - 1); }
+Rect MainWindow::rConsoleBody()  const
 {
     Rect b = rBottomBody();
-    return Rect(b.x1, b.y2 - UI_CONSOLE_INPUT_H, b.x2, b.y2);
+    return Rect(b.x1, b.y1, b.x2, (m_bottomTab == 1) ? b.y2 - UI_CONSOLE_INPUT_H : b.y2);
 }
-Rect MainWindow::rConsoleBody() const
-{
-    Rect b = rBottomBody();
-    return Rect(b.x1, b.y1, b.x2, b.y2 - UI_CONSOLE_INPUT_H);
-}
+Rect MainWindow::rConsoleInput() const { Rect b = rBottom(); return Rect(b.x1 + 1, b.y2 - UI_CONSOLE_INPUT_H, b.x2 - 1, b.y2 - 1); }
+
 Rect MainWindow::dropRect(int mi) const
 {
     int x = mi * UI_MENU_TITLE_W;
     int n = (int)m_menus[mi].items.size();
-    return Rect(x, rMenu().y2, x + UI_DROP_W, rMenu().y2 + n * UI_DROP_ITEM_H + 6);
+    return Rect(x, UI_MENU_H, x + UI_DROP_W, UI_MENU_H + 6 + n * UI_DROP_ITEM_H + 6);
 }
 Rect MainWindow::dropItemRect(int mi, int ii) const
 {
     Rect d = dropRect(mi);
-    int y = d.y1 + 3 + ii * UI_DROP_ITEM_H;
-    return Rect(d.x1 + 2, y, d.x2 - 2, y + UI_DROP_ITEM_H);
+    int y = d.y1 + 6 + ii * UI_DROP_ITEM_H;
+    return Rect(d.x1 + 4, y, d.x2 - 4, y + UI_DROP_ITEM_H);
 }
 Rect MainWindow::toolBtnRect(int i) const
 {
+    settextstyle(13, 0, _T("Microsoft YaHei"));
     Rect t = rTool();
-    int x = t.x1 + 6, y = t.y1 + 5, h = t.h() - 10;
-    for (int k = 0; k < i; k++)
+    int x = 8;
+    for (int k = 0; k <= i && k < (int)m_tools.size(); k++)
     {
-        if (m_tools[k].cmd == CMD_NONE) x += 10;
-        else                            x += strWidth(m_tools[k].label) + 20;
+        if (m_tools[k].cmd == CMD_NONE) { if (k < i) x += 14; continue; }
+        int w = strWidth(m_tools[k].label) + 18;
+        if (w < 40) w = 40;
+        if (k == i) return Rect(x, t.y1 + 5, x + w, t.y2 - 5);
+        x += w + 6;
     }
-    int w = (m_tools[i].cmd == CMD_NONE) ? 2 : strWidth(m_tools[i].label) + 18;
-    return Rect(x, y, x + w, y + h);
+    return Rect(0, 0, 0, 0);
 }
 
 MainWindow::FindLayout MainWindow::findLayout() const
 {
     FindLayout L;
-    Rect f = rFindBar();
-    int y = f.y1 + 5, h = f.h() - 10;
-    int x = f.x1 + 8;
-    L.bar     = f;
-    L.fInput  = Rect(x, y, x + 200, y + h);          x += 208;
-    L.bPrev   = Rect(x, y, x + 28,  y + h);          x += 32;
-    L.bNext   = Rect(x, y, x + 28,  y + h);          x += 36;
-    L.rInput  = Rect(x, y, x + 200, y + h);          x += 208;
-    L.bRep    = Rect(x, y, x + 56,  y + h);          x += 60;
-    L.bRepAll = Rect(x, y, x + 76,  y + h);          x += 84;
-    L.chk     = Rect(x, y, x + 76,  y + h);          x += 84;
-    L.bClose  = Rect(f.x2 - 30, y, f.x2 - 8, y + h);
+    Rect bar = rFindBar();
+    L.bar = bar;
+    int x = 10, y = bar.y1 + 5, hh = bar.h() - 10;
+
+    settextstyle(14, 0, _T("Microsoft YaHei"));
+    drawStr(x, y + 3, "查找:"); x += 46;
+    L.fInput = Rect(x, y, x + 170, y + hh); x += 178;
+    drawStr(x, y + 3, "替换:"); x += 46;
+    L.rInput = Rect(x, y, x + 170, y + hh); x += 178;
+    L.chk    = Rect(x, y + 3, x + 16, y + 19); x += 22;
+    drawStr(x, y + 3, "区分大小写"); x += 84;
+
+    L.bPrev   = Rect(x, y, x + 34, y + hh);               x += 38;
+    L.bNext   = Rect(x, y, x + 34, y + hh);               x += 38;
+    L.bRep    = Rect(x, y, x + 46, y + hh);               x += 50;
+    L.bRepAll = Rect(x, y, x + 66, y + hh);               x += 70;
+    L.bClose  = Rect(bar.x2 - 34, y, bar.x2 - 8, y + hh);
     return L;
 }
 
 std::string MainWindow::tabLabel(int i) const
 {
-    if (i == 0)
+    int errN = 0, warnN = 0;
+    for (size_t k = 0; k < m_diagnostics.size(); k++)
     {
-        int e = 0, w = 0;
-        for (size_t k = 0; k < m_diagnostics.size(); k++)
-        {
-            if (m_diagnostics[k].level == DIAG_ERROR) e++;
-            else if (m_diagnostics[k].level == DIAG_WARNING) w++;
-        }
-        char buf[64];
-        sprintf_s(buf, "诊断  %d 错误 / %d 警告", e, w);
-        return std::string(buf);
+        if (m_diagnostics[k].level == DIAG_ERROR) errN++;
+        else if (m_diagnostics[k].level == DIAG_WARNING) warnN++;
     }
+    if (i == 0) return "诊断  " + itos(errN) + " 错误 / " + itos(warnN) + " 警告";
     return "控制台";
 }
 
@@ -414,641 +620,56 @@ int MainWindow::visibleLines() const
 }
 
 // ============================================================================
-//  菜单栏
+//  消息处理
 // ============================================================================
-void MainWindow::drawMenuBar()
+void MainWindow::pumpMessages()
 {
-    Rect m = rMenu();
-    fillRect(m, th->menuBg);
-    setlinecolor(th->border);
-    line(m.x1, m.y2 - 1, m.x2, m.y2 - 1);
-
-    settextstyle(14, 0, _T("Microsoft YaHei"));
-    for (int i = 0; i < (int)m_menus.size(); i++)
+    ExMessage msg;
+    while (peekmessage(&msg, EX_MOUSE | EX_KEY | EX_CHAR | EX_WINDOW, true))
     {
-        Rect r(0 + i * UI_MENU_TITLE_W, m.y1,
-               0 + (i + 1) * UI_MENU_TITLE_W, m.y2);
-        bool on = (m_openMenu == i) || (m_openMenu < 0 && m_hoverMenu == i);
-        if (on) fillRect(r, th->menuHover);
-        settextcolor(on ? th->menuTextHover : th->menuText);
-        drawStrCenter(r, m_menus[i].title);
-    }
-}
-
-void MainWindow::drawDropdown()
-{
-    if (m_openMenu < 0) return;
-    const MenuDef& md = m_menus[m_openMenu];
-    Rect d = dropRect(m_openMenu);
-
-    setfillcolor(th->menuBg);
-    setlinecolor(th->border);
-    solidrectangle(d.x1, d.y1, d.x2, d.y2);
-    rectangle(d.x1, d.y1, d.x2, d.y2);
-
-    settextstyle(14, 0, _T("Microsoft YaHei"));
-    for (int i = 0; i < (int)md.items.size(); i++)
-    {
-        Rect r = dropItemRect(m_openMenu, i);
-        bool on = (m_hoverItem == i);
-        if (on) fillRect(r, th->menuHover);
-
-        settextcolor(on ? th->menuTextHover : th->menuText);
-        outtextxy(r.x1 + 8, r.y1 + 5, ts(md.items[i].label).c_str());
-
-        if (!md.items[i].hot.empty())
+        switch (msg.message)
         {
-            settextcolor(th->dim);
-            int hw = strWidth(md.items[i].hot);
-            outtextxy(r.x2 - hw - 8, r.y1 + 5, ts(md.items[i].hot).c_str());
+        case WM_MOUSEMOVE:
+            m_mouseX = msg.x; m_mouseY = msg.y;
+            onMouseMove(msg.x, msg.y);
+            break;
+        case WM_LBUTTONDOWN:
+            m_mouseX = msg.x; m_mouseY = msg.y;
+            onMouseDown(msg.x, msg.y);
+            break;
+        case WM_LBUTTONUP:
+            onMouseUp(msg.x, msg.y);
+            break;
+        case WM_MOUSEWHEEL:
+            onWheel(msg.wheel);
+            break;
+        case WM_KEYDOWN:
+            onKeyDown(msg.vkcode,
+                      (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0,
+                      (GetAsyncKeyState(VK_SHIFT)   & 0x8000) != 0,
+                      (GetAsyncKeyState(VK_MENU)    & 0x8000) != 0);
+            break;
+        case WM_CHAR:
+            onCharInput((unsigned int)msg.ch);
+            break;
+        case WM_CLOSE:
+            doExit();
+            break;
+        default:
+            break;
         }
     }
 }
 
-// ============================================================================
-//  工具栏（A 的 drawButtons，改名后仍由 drawAll 调用）
-// ============================================================================
-void MainWindow::drawButtons()
+void MainWindow::onMouseDown(int x, int y)
 {
-    drawToolbar();
-}
+    CoreApi& api = CoreApi::inst();
 
-void MainWindow::drawToolbar()
-{
-    Rect t = rTool();
-    fillRect(t, th->menuBg);
-    setlinecolor(th->border);
-    line(t.x1, t.y2 - 1, t.x2, t.y2 - 1);
-
-    settextstyle(14, 0, _T("Microsoft YaHei"));
-    for (int i = 0; i < (int)m_tools.size(); i++)
-    {
-        Rect r = toolBtnRect(i);
-        if (m_tools[i].cmd == CMD_NONE)
-        {
-            setlinecolor(th->border);
-            line(r.x1, r.y1 + 2, r.x1, r.y2 - 2);
-            continue;
-        }
-        bool on = r.hit(m_mouseX, m_mouseY);
-        fillRoundRect(r, 4, on ? th->btnHover : th->btn);
-        settextcolor(th->btnText);
-        drawStrCenter(r, m_tools[i].label);
-    }
-}
-
-// ============================================================================
-//  编辑区
-// ============================================================================
-namespace
-{
-    // 简易裁剪：进入作用域裁剪，离开自动恢复
-    struct ClipGuard
-    {
-        HRGN m_rgn;
-        ClipGuard(const Rect& r)
-        {
-            m_rgn = CreateRectRgn(r.x1, r.y1, r.x2, r.y2);
-            setcliprgn(m_rgn);
-        }
-        ~ClipGuard()
-        {
-            setcliprgn(NULL);
-            DeleteObject(m_rgn);
-        }
-    };
-
-    const char* KEYWORDS[] = {
-        "if","else","for","while","do","switch","case","default","break","continue",
-        "return","goto","sizeof","static","const","extern","volatile","register",
-        "struct","union","enum","typedef","auto","restrict","inline","_Bool", 0
-    };
-    const char* TYPES[] = {
-        "int","char","float","double","long","short","void","signed","unsigned", 0
-    };
-
-    bool inList(const char* list[], const std::string& s)
-    {
-        for (int i = 0; list[i]; i++) if (s == list[i]) return true;
-        return false;
-    }
-}
-
-void MainWindow::drawEditor()
-{
-    Rect e = rEdit();
-    fillRect(e, th->panel);
-
-    if (!buffer) return;
-
-    int total = buffer->getLineCount();
-    int vis   = visibleLines();
-
-    // 滚动位置夹取
-    if (m_topLine > total - 1) m_topLine = total - 1;
-    if (m_topLine < 0) m_topLine = 0;
-
-    int curRow = buffer->getCursorY();
-
-    // ---- 行号栏 ----
-    Rect g = rGutter();
-    {
-        ClipGuard cg(g);
-        fillRect(g, th->gutterBg);
-        setlinecolor(th->border);
-        line(g.x2 - 1, g.y1, g.x2 - 1, g.y2);
-
-        settextstyle(13, 0, _T("Consolas"));
-        for (int i = m_topLine; i < total && i < m_topLine + vis; i++)
-        {
-            int y  = e.y1 + (i - m_topLine) * UI_LINE_H;
-            char buf[16];
-            sprintf_s(buf, "%d", i + 1);
-            int w = strWidth(buf);
-            settextcolor(i == curRow ? th->text : th->gutterText);
-            drawStr(g.x2 - 8 - w, y + 2, buf);
-        }
-    }
-
-    // ---- 正文 ----
-    Rect t = rText();
-    {
-        ClipGuard cg(t);
-
-        settextstyle(UI_FONT_H, 0, _T("Consolas"));
-        setbkmode(TRANSPARENT);
-
-        // 块注释状态：只在视图变化时重算一次
-        if (m_blockFrameCache != m_tick / 4 || m_blockTopCache != m_topLine)
-        {
-            bool st = false;
-            for (int i = 0; i < m_topLine; i++)
-            {
-                std::string s = buffer->getLine(i);
-                for (size_t k = 0; k + 1 < s.size(); k++)
-                {
-                    if (!st && s[k] == '/' && s[k + 1] == '*') { st = true; k++; }
-                    else if (st && s[k] == '*' && s[k + 1] == '/') { st = false; k++; }
-                }
-            }
-            m_blockValCache  = st;
-            m_blockTopCache  = m_topLine;
-            m_blockFrameCache = m_tick / 4;
-        }
-        bool inBlock = m_blockValCache;
-
-        for (int i = m_topLine; i < total && i < m_topLine + vis; i++)
-        {
-            int y = e.y1 + (i - m_topLine) * UI_LINE_H;
-
-            // 当前行高亮
-            if (i == curRow)
-            {
-                setfillcolor(th->curLine);
-                solidrectangle(t.x1, y, t.x2, y + UI_LINE_H);
-            }
-            drawCodeLine(t.x1 + 6, y + 2, i, t, inBlock);
-        }
-
-        // ---- 光标 ----
-        if (m_focus == FOCUS_EDITOR && (m_tick % 30) < 18)
-        {
-            std::string curLineText = buffer->getLine(curRow);
-            int dcol = dispColOfIndex(curLineText, buffer->getCursorX()) - m_leftCol;
-            int cx = t.x1 + 6 + dcol * m_charW;
-            int cy = e.y1 + (curRow - m_topLine) * UI_LINE_H;
-            setlinecolor(th->text);
-            line(cx, cy + 2, cx, cy + UI_LINE_H - 2);
-        }
-    }
-
-    // ---- 滚动条 ----
-    drawScrollbar(rVScroll(), m_topLine, total, vis, true);
-
-    int maxDisp = 0;
-    for (int i = 0; i < total; i++)
-        maxDisp = std::max(maxDisp, dispWidth(buffer->getLine(i)));
-    drawScrollbar(rHScroll(), m_leftCol, maxDisp + 1, rText().w() / (m_charW > 0 ? m_charW : 8), false);
-}
-
-// 画一行代码（含选区高亮与语法着色）
-void MainWindow::drawCodeLine(int x, int y, int row, const Rect& clip, bool& inBlock)
-{
-    std::string s = buffer->getLine(row);
-
-    // ---- 选区高亮 ----
-    if (m_selActive)
-    {
-        int r1 = m_selR1, c1 = m_selC1, r2 = m_selR2, c2 = m_selC2;
-        if (row >= r1 && row <= r2)
-        {
-            int a = (row == r1) ? c1 : 0;
-            int b = (row == r2) ? c2 : (int)s.size();
-            int da = dispColOfIndex(s, a) - m_leftCol;
-            int db = dispColOfIndex(s, b) - m_leftCol;
-            if (db > da)
-            {
-                setfillcolor(th->sel);
-                solidrectangle(x + da * m_charW, y,
-                               x + db * m_charW, y + UI_LINE_H - 2);
-            }
-        }
-    }
-
-    if (s.empty()) return;
-
-    // ---- 简易分词 + 着色 ----
-    size_t i = 0;
-    while (i < s.size())
-    {
-        size_t start = i;
-        COLORREF col = th->ident;
-
-        unsigned char c0 = (unsigned char)s[i];
-
-        if (inBlock)
-        {
-            while (i + 1 < s.size())
-            {
-                if (s[i] == '*' && s[i + 1] == '/') { i += 2; inBlock = false; break; }
-                i++;
-            }
-            if (i >= s.size() && inBlock) i = s.size();
-            col = th->comment;
-        }
-        else if (c0 == '/' && i + 1 < s.size() && s[i + 1] == '/')
-        {
-            i = s.size();
-            col = th->comment;
-        }
-        else if (c0 == '/' && i + 1 < s.size() && s[i + 1] == '*')
-        {
-            inBlock = true;
-            i += 2;
-            while (i + 1 < s.size())
-            {
-                if (s[i] == '*' && s[i + 1] == '/') { i += 2; inBlock = false; break; }
-                i++;
-            }
-            if (inBlock) i = s.size();
-            col = th->comment;
-        }
-        else if (c0 == '"' || c0 == '\'')
-        {
-            char quote = (char)c0;
-            i++;
-            while (i < s.size())
-            {
-                if (s[i] == '\\' && i + 1 < s.size()) { i += 2; continue; }
-                if (s[i] == quote) { i++; break; }
-                i++;
-            }
-            col = th->str;
-        }
-        else if (c0 == '#')
-        {
-            while (i < s.size() && isalpha((unsigned char)s[i])) i++;
-            col = th->prep;
-        }
-        else if (isdigit(c0))
-        {
-            while (i < s.size() && (isalnum((unsigned char)s[i]) || s[i] == '.' || s[i] == 'x' || s[i] == 'X')) i++;
-            col = th->num;
-        }
-        else if (isalpha(c0) || c0 == '_')
-        {
-            while (i < s.size() && (isalnum((unsigned char)s[i]) || s[i] == '_')) i++;
-            std::string w = s.substr(start, i - start);
-            if      (inList(KEYWORDS, w)) col = th->kw;
-            else if (inList(TYPES, w))    col = th->kwType;
-            else                          col = th->ident;
-        }
-        else if (c0 >= 0x81 && c0 <= 0xFE)   // 中文：两个字节一起输出
-        {
-            i += 2;
-            col = th->ident;
-        }
-        else
-        {
-            i++;
-            col = th->punct;
-        }
-
-        std::string seg = s.substr(start, i - start);
-        if (seg.empty()) continue;
-
-        int dStart = dispColOfIndex(s, (int)start) - m_leftCol;
-        int dEnd   = dispColOfIndex(s, (int)i)     - m_leftCol;
-        if (dEnd <= 0) continue;                       // 完全在左边界外
-        if (dStart * m_charW > clip.w()) break;        // 完全在右边界外
-
-        settextcolor(col);
-        drawStr(x + dStart * m_charW, y, seg);
-    }
-}
-
-void MainWindow::drawScrollbar(const Rect& r, int pos, int total, int page, bool vertical)
-{
-    if (total <= page || total <= 1)
-    {
-        fillRect(r, th->panel);
-        return;
-    }
-    fillRect(r, th->gutterBg);
-
-    int track = vertical ? r.h() : r.w();
-    int thumb = track * page / total;
-    if (thumb < 20) thumb = 20;
-    int maxPos = total - page;
-    if (maxPos < 1) maxPos = 1;
-    int t = (track - thumb) * pos / maxPos;
-
-    Rect tb = vertical ? Rect(r.x1 + 2, r.y1 + t, r.x2 - 2, r.y1 + t + thumb)
-                       : Rect(r.x1 + t, r.y1 + 2, r.x1 + t + thumb, r.y2 - 2);
-    fillRoundRect(tb, 3, th->btnBorder);
-}
-
-// ============================================================================
-//  查找 / 替换条
-// ============================================================================
-void MainWindow::drawFindBar()
-{
-    if (!m_findVisible) return;
-    FindLayout L = findLayout();
-
-    fillRect(L.bar, th->menuBg);
-    setlinecolor(th->border);
-    line(L.bar.x1, L.bar.y2 - 1, L.bar.x2, L.bar.y2 - 1);
-
-    settextstyle(14, 0, _T("Microsoft YaHei"));
-
-    auto drawInput = [&](const Rect& r, const std::string& text, bool focused)
-    {
-        fillRectB(r, th->panel, focused ? th->accent : th->border);
-        std::string show = text.empty() ? "" : text;
-        settextcolor(text.empty() ? th->dim : th->text);
-        outtextxy(r.x1 + 5, r.y1 + 4, ts(show).c_str());
-        if (focused && (m_tick % 30) < 18)
-        {
-            int w = strWidth(show);
-            setlinecolor(th->text);
-            line(r.x1 + 6 + w, r.y1 + 3, r.x1 + 6 + w, r.y2 - 3);
-        }
-    };
-
-    drawInput(L.fInput, m_findText.empty() ? "查找" : m_findText, m_focus == FOCUS_FIND);
-    drawInput(L.rInput, m_replaceText.empty() ? "替换为" : m_replaceText, m_focus == FOCUS_REPLACE);
-
-    auto drawBtn = [&](const Rect& r, const std::string& label)
-    {
-        bool on = r.hit(m_mouseX, m_mouseY);
-        fillRoundRect(r, 3, on ? th->btnHover : th->btn);
-        settextcolor(th->btnText);
-        drawStrCenter(r, label);
-    };
-
-    drawBtn(L.bPrev,   "◀");
-    drawBtn(L.bNext,   "▶");
-    drawBtn(L.bRep,    "替换");
-    drawBtn(L.bRepAll, "全部替换");
-
-    // 大小写复选框
-    fillRectB(L.chk, th->panel, th->border);
-    Rect box(L.chk.x1 + 4, L.chk.y1 + (L.chk.h() - 12) / 2, L.chk.x1 + 16, L.chk.y1 + (L.chk.h() - 12) / 2 + 12);
-    fillRectB(box, m_caseSensitive ? th->accent : th->panel, th->border);
-    settextcolor(th->text);
-    outtextxy(L.chk.x1 + 20, L.chk.y1 + 4, ts("区分大小写").c_str());
-
-    drawBtn(L.bClose, "✕");
-
-    if (m_hasMatch)
-    {
-        settextcolor(th->dim);
-        char buf[64];
-        sprintf_s(buf, "第 %d 行", m_matchR + 1);
-        outtextxy(L.bNext.x2 + 10, L.bar.y1 + 9, ts(buf).c_str());
-    }
-}
-
-// ============================================================================
-//  底部面板（诊断 / 控制台）
-// ============================================================================
-void MainWindow::drawBottom()
-{
-    Rect b = rBottom();
-    fillRect(b, th->panel);
-    setlinecolor(th->border);
-    line(b.x1, b.y1, b.x2, b.y1);
-
-    Rect tabs = rBottomTabs();
-    fillRect(tabs, th->gutterBg);
-    settextstyle(13, 0, _T("Microsoft YaHei"));
-
-    int x = tabs.x1 + 8;
-    for (int i = 0; i < 2; i++)
-    {
-        std::string label = tabLabel(i);
-        int w = strWidth(label) + 26;
-        Rect r(x, tabs.y1 + 2, x + w, tabs.y2 - 1);
-        bool on = (m_bottomTab == i);
-        fillRect(r, on ? th->panel : th->gutterBg);
-        setlinecolor(on ? th->accent : th->border);
-        line(r.x1, r.y2 - 1, r.x2, r.y2 - 1);
-        settextcolor(on ? th->text : th->dim);
-        outtextxy(r.x1 + 13, tabs.y1 + 6, ts(label).c_str());
-        x += w;
-    }
-
-    if (m_bottomTab == 0) drawDiagnostics();
-    else                  drawConsole();
-}
-
-void MainWindow::drawDiagnostics()
-{
-    Rect body = rBottomBody();
-    fillRect(body, th->panel);
-
-    int lh = 20;
-    int page = body.h() / lh;
-    int total = (int)m_diagnostics.size();
-    if (m_diagTop > total - page) m_diagTop = total - page;
-    if (m_diagTop < 0) m_diagTop = 0;
-
-    {
-        ClipGuard cg(body);
-        settextstyle(14, 0, _T("Consolas"));
-        for (int i = m_diagTop; i < total && i < m_diagTop + page; i++)
-        {
-            const Diagnostic& d = m_diagnostics[i];
-            int y = body.y1 + (i - m_diagTop) * lh;
-
-            bool hover = (m_mouseX > body.x1 && m_mouseX < body.x2 &&
-                          m_mouseY >= y && m_mouseY < y + lh);
-            if (hover)
-            {
-                setfillcolor(th->curLine);
-                solidrectangle(body.x1, y, body.x2, y + lh);
-            }
-
-            COLORREF c = (d.level == DIAG_ERROR)   ? th->err
-                       : (d.level == DIAG_WARNING) ? th->warn : th->dim;
-            settextcolor(c);
-
-            char buf[32];
-            sprintf_s(buf, "第 %d 行", d.line + 1);
-            drawStr(body.x1 + 8, y + 3, buf);
-            drawStr(body.x1 + 78, y + 3, d.message);
-        }
-        if (total == 0)
-        {
-            settextcolor(th->dim);
-            drawStr(body.x1 + 8, body.y1 + 6, "（暂无诊断信息，按 F9 编译后会在这里显示）");
-        }
-    }
-
-    drawScrollbar(rBottomScroll(), m_diagTop, total, page, true);
-}
-
-void MainWindow::drawConsole()
-{
-    Rect body = rBottomBody();
-    fillRect(body, th->outBg);
-
-    int lh = 18;
-    int page = rConsoleBody().h() / lh;
-    int total = (int)m_console.size();
-    if (m_consoleTop > total - page) m_consoleTop = total - page;
-    if (m_consoleTop < 0) m_consoleTop = 0;
-
-    {
-        ClipGuard cg(rConsoleBody());
-        settextstyle(13, 0, _T("Consolas"));
-        settextcolor(th->outText);
-        for (int i = m_consoleTop; i < total && i < m_consoleTop + page; i++)
-        {
-            int y = rConsoleBody().y1 + (i - m_consoleTop) * lh;
-            drawStr(body.x1 + 8, y + 2, m_console[i]);
-        }
-    }
-
-    // 输入行
-    Rect in = rConsoleInput();
-    fillRect(in, th->outBg);
-    setlinecolor(th->border);
-    line(in.x1, in.y1, in.x2, in.y1);
-    settextcolor(th->outPrompt);
-    drawStr(in.x1 + 8, in.y1 + 4, ">");
-    settextcolor(th->outText);
-    drawStr(in.x1 + 24, in.y1 + 4, m_inputLine);
-    if (m_focus == FOCUS_CONSOLE && (m_tick % 30) < 18)
-    {
-        int w = strWidth(m_inputLine);
-        setlinecolor(th->outText);
-        line(in.x1 + 25 + w, in.y1 + 3, in.x1 + 25 + w, in.y2 - 3);
-    }
-
-    drawScrollbar(rBottomScroll(), m_consoleTop, total, page, true);
-}
-
-// ============================================================================
-//  状态栏（A 原有，函数体重写）
-// ============================================================================
-void MainWindow::drawStatusBar()
-{
-    Rect s = rStatus();
-    fillRect(s, th->statusBg);
-    setlinecolor(th->border);
-    line(s.x1, s.y1, s.x2, s.y1);
-
-    settextstyle(13, 0, _T("Microsoft YaHei"));
-    settextcolor(th->statusText);
-
-    std::string fname = buffer->getFilePath();
-    if (fname.empty()) fname = "未命名.c";
-    std::string head = fname + (buffer->isDirty() ? " *" : "");
-    drawStr(s.x1 + 10, s.y1 + 5, head);
-
-    char buf[64];
-    sprintf_s(buf, "行 %d, 列 %d", buffer->getCursorY() + 1, buffer->getCursorX() + 1);
-    int x = s.x1 + 10 + strWidth(head) + 24;
-    drawStr(x, s.y1 + 5, buf);
-    x += strWidth(buf) + 24;
-
-    // 编译状态
-    const char* cs = "";
-    switch (m_compileState)
-    {
-    case CS_OK:         cs = "编译成功"; break;
-    case CS_WARNING:    cs = "编译成功（有警告）"; break;
-    case CS_ERROR:      cs = "编译失败"; break;
-    case CS_NOCOMPILER: cs = "未找到编译器"; break;
-    case CS_TIMEOUT:    cs = "编译超时"; break;
-    case CS_INTERNAL:   cs = "内部错误"; break;
-    default:            cs = "尚未编译"; break;
-    }
-    settextcolor(m_compileState == CS_NONE ? th->statusText : m_statusColor);
-    drawStr(x, s.y1 + 5, cs);
-    x += strWidth(cs) + 24;
-
-    settextcolor(th->statusText);
-    drawStr(x, s.y1 + 5, th->name);
-
-    int rw = strWidth(MINIC_VERSION);
-    drawStr(s.x2 - rw - 10, s.y1 + 5, MINIC_VERSION);
-
-    // 临时提示信息（居中显示，约 2.4 秒后自动消失）
-    if (!m_statusMsg.empty() && m_tick < m_statusUntil)
-    {
-        int mw = strWidth(m_statusMsg);
-        settextcolor(m_statusColor);
-        drawStr((s.x1 + s.x2) / 2 - mw / 2, s.y1 + 5, m_statusMsg);
-    }
-}
-
-// ============================================================================
-//  输出面板（A 原有名字，现在把 A 的 outputPanelText 同步进控制台）
-// ============================================================================
-void MainWindow::drawOutputPanel()
-{
-    // A 的 outputPanelText 由 doCompile / doRun 等写入，
-    // 这里保证它至少在控制台里能看到一次。
-    // 真正的绘制在 drawConsole() 里完成。
-}
-
-void MainWindow::appendConsole(const std::string& text)
-{
-    if (text.empty()) return;
-    std::string cur;
-    for (size_t i = 0; i < text.size(); i++)
-    {
-        if (text[i] == '\n') { m_console.push_back(cur); cur.clear(); }
-        else if (text[i] != '\r') cur += text[i];
-    }
-    if (!cur.empty()) m_console.push_back(cur);
-    if ((int)m_console.size() > 2000)
-        m_console.erase(m_console.begin(), m_console.begin() + 500);
-    m_consoleTop = (int)m_console.size();
-    m_bottomTab = 1;
-}
-
-void MainWindow::setStatus(const std::string& msg, COLORREF c)
-{
-    m_statusMsg = msg;
-    m_statusColor = c;
-    m_statusUntil = m_tick + 150;      // 约 2.4 秒后自动消失
-}
-
-// ============================================================================
-//  鼠标（A 原有 handleMouseClick，函数体由 C 实现）
-// ============================================================================
-void MainWindow::handleMouseClick(int x, int y)
-{
-    m_mouseX = x; m_mouseY = y;
-
-    // ---- 1. 展开中的下拉菜单 ----
+    // ---------- 1. 菜单下拉（最高优先级） ----------
     if (m_openMenu >= 0)
     {
-        if (dropRect(m_openMenu).hit(x, y))
+        Rect d = dropRect(m_openMenu);
+        if (d.hit(x, y))
         {
             for (int i = 0; i < (int)m_menus[m_openMenu].items.size(); i++)
             {
@@ -1056,125 +677,168 @@ void MainWindow::handleMouseClick(int x, int y)
                 {
                     int cmd = m_menus[m_openMenu].items[i].cmd;
                     m_openMenu = -1;
-                    onCommand(cmd);
+                    execCmd(cmd);
                     return;
                 }
             }
             return;
         }
-        m_openMenu = -1;      // 点到外面，收起菜单
+        m_openMenu = -1;   // 点击别处则关闭
     }
 
-    // ---- 2. 菜单栏标题 ----
+    // ---------- 2. 菜单栏 ----------
     if (rMenu().hit(x, y))
     {
-        for (int i = 0; i < (int)m_menus.size(); i++)
-        {
-            if (x >= i * UI_MENU_TITLE_W && x < (i + 1) * UI_MENU_TITLE_W)
-            {
-                m_openMenu = (m_openMenu == i) ? -1 : i;
-                return;
-            }
-        }
+        int idx = x / UI_MENU_TITLE_W;
+        if (idx >= 0 && idx < (int)m_menus.size())
+            m_openMenu = (m_openMenu == idx) ? -1 : idx;
         return;
     }
 
-    // ---- 3. 工具栏 ----
+    // ---------- 3. 工具栏 ----------
     if (rTool().hit(x, y))
     {
         for (int i = 0; i < (int)m_tools.size(); i++)
         {
-            if (m_tools[i].cmd != CMD_NONE && toolBtnRect(i).hit(x, y))
-            {
-                onCommand(m_tools[i].cmd);
-                return;
-            }
+            if (m_tools[i].cmd == CMD_NONE) continue;
+            if (toolBtnRect(i).hit(x, y)) { execCmd(m_tools[i].cmd); return; }
         }
         return;
     }
 
-    // ---- 4. 查找条 ----
+    // ---------- 4. 查找 / 替换条 ----------
     if (m_findVisible && rFindBar().hit(x, y))
     {
         FindLayout L = findLayout();
-        if (L.bClose.hit(x, y)) { m_findVisible = false; m_focus = FOCUS_EDITOR; return; }
-        if (L.fInput.hit(x, y)) { m_focus = FOCUS_FIND;    return; }
-        if (L.rInput.hit(x, y)) { m_focus = FOCUS_REPLACE; return; }
-        if (L.chk.hit(x, y))    { m_caseSensitive = !m_caseSensitive; return; }
-        if (L.bPrev.hit(x, y))  { onCommand(CMD_FIND_PREV); return; }
-        if (L.bNext.hit(x, y))  { onCommand(CMD_FIND_NEXT); return; }
-        if (L.bRep.hit(x, y))   { onCommand(CMD_REPLACE_ONE); return; }
-        if (L.bRepAll.hit(x, y)){ onCommand(CMD_REPLACE_ALL); return; }
+        if (L.fInput.hit(x, y))  { m_focus = FOCUS_FIND;    return; }
+        if (L.rInput.hit(x, y))  { m_focus = FOCUS_REPLACE; return; }
+        if (L.chk.hit(x, y))     { m_caseSensitive = !m_caseSensitive; return; }
+        if (L.bPrev.hit(x, y))   { searchNext(false); return; }
+        if (L.bNext.hit(x, y))   { searchNext(true);  return; }
+        if (L.bRep.hit(x, y))    { replaceOne();      return; }
+        if (L.bRepAll.hit(x, y)) { replaceAll();      return; }
+        if (L.bClose.hit(x, y))  { m_findVisible = false; m_focus = FOCUS_EDITOR; return; }
         return;
     }
 
-    // ---- 5. 底部面板 ----
+    // ---------- 5. 底部面板 ----------
     if (rBottom().hit(x, y))
     {
+        Rect tb = rBottomTabs();
+        settextstyle(13, 0, _T("Microsoft YaHei"));
+        int bx = tb.x1 + 8;
+        for (int i = 0; i < 2; i++)
+        {
+            int w = strWidth(tabLabel(i)) + 26;
+            if (x >= bx && x <= bx + w && y >= tb.y1 && y <= tb.y2)
+            { m_bottomTab = i; return; }
+            bx += w + 4;
+        }
+
+        if (rConsoleInput().hit(x, y) && m_bottomTab == 1) { m_focus = FOCUS_CONSOLE; return; }
+        if (rBottomBody().hit(x, y))
+        {
+            if (m_bottomTab == 0)
+            {
+                // 点击诊断条目 -> 跳转到源码对应行
+                Rect body = rBottomBody();
+                int idx = m_diagTop + (y - body.y1 - 4) / 22;
+                if (idx >= 0 && idx < (int)m_diagnostics.size())
+                {
+                    const Diagnostic& d = m_diagnostics[idx];
+                    api.bufGotoLine(d.line);
+                    api.bufSetCursor(d.line, d.column);
+                    clearSelection();
+                    scrollToCursor();
+                    m_focus = FOCUS_EDITOR;
+                }
+            }
+            else m_focus = FOCUS_CONSOLE;
+            return;
+        }
+
+        // 底部滚动条
         if (rBottomScroll().hit(x, y))
         {
-            m_dragV = true; m_dragInBottom = true; m_dragStart = y;
-            return;
-        }
-        if (rBottomTabs().hit(x, y))
-        {
-            int tx = rBottomTabs().x1 + 8;
-            for (int i = 0; i < 2; i++)
+            int total = (m_bottomTab == 0) ? (int)m_diagnostics.size() : (int)m_console.size();
+            int page  = (m_bottomTab == 0) ? (rBottomBody().h() / 22)
+                                           : (rConsoleBody().h() / 18);
+            int& top = (m_bottomTab == 0) ? m_diagTop : m_consoleTop;
+            if (total > page)
             {
-                int w = strWidth(tabLabel(i)) + 26;
-                if (x >= tx && x < tx + w) { m_bottomTab = i; return; }
-                tx += w;
+                int track = rBottomScroll().h();
+                int kh = (int)((double)track * page / total);
+                if (kh < 24) kh = 24;
+                int maxp = track - kh;
+                int knobY = rBottomScroll().y1 + (total - page > 0 ? top * maxp / (total - page) : 0);
+                if (y < knobY)          top -= page;
+                else if (y > knobY + kh) top += page;
+                else { m_dragV = true; m_dragStart = y - knobY; }
+                top = clampi(top, 0, total - page);
             }
             return;
         }
-        // 诊断行 → 跳到源码对应行
-        if (m_bottomTab == 0 && rBottomBody().hit(x, y))
-        {
-            int idx = m_diagTop + (y - rBottomBody().y1) / 20;
-            if (idx >= 0 && idx < (int)m_diagnostics.size())
-            {
-                int line = m_diagnostics[idx].line;
-                bufSetCursor(buffer, line, 0);
-                m_topLine = line - visibleLines() / 2;
-                if (m_topLine < 0) m_topLine = 0;
-                clearSel();
-                m_focus = FOCUS_EDITOR;
-            }
-            return;
-        }
-        // 控制台输入行
-        if (m_bottomTab == 1 && rConsoleInput().hit(x, y))
-        {
-            m_focus = FOCUS_CONSOLE;
-            return;
-        }
-        m_focus = (m_bottomTab == 1) ? FOCUS_CONSOLE : FOCUS_EDITOR;
         return;
     }
 
-    // ---- 6. 编辑区滚动条 ----
+    // ---------- 6. 编辑区滚动条 ----------
     if (rVScroll().hit(x, y))
     {
-        m_dragV = true; m_dragInBottom = false; m_dragStart = y;
+        int total = api.bufLineCount();
+        int page  = visibleLines();
+        if (total > page)
+        {
+            int track = rVScroll().h();
+            int kh = (int)((double)track * page / total);
+            if (kh < 24) kh = 24;
+            int maxp = track - kh;
+            int knobY = rVScroll().y1 + (total - page > 0 ? m_topLine * maxp / (total - page) : 0);
+            if (y < knobY)            m_topLine -= page;
+            else if (y > knobY + kh)  m_topLine += page;
+            else { m_dragV = true; m_dragStart = y - knobY; }
+            m_topLine = clampi(m_topLine, 0, total - page);
+        }
         return;
     }
     if (rHScroll().hit(x, y))
     {
-        m_dragH = true; m_dragStart = x;
+        int total = maxLineCols();
+        int page  = hPageCols();
+        if (total > page)
+        {
+            int track = rHScroll().w();
+            int kh = (int)((double)track * page / total);
+            if (kh < 24) kh = 24;
+            int maxp = track - kh;
+            int knobX = rHScroll().x1 + (total - page > 0 ? m_leftCol * maxp / (total - page) : 0);
+            if (x < knobX)            m_leftCol -= page;          // 滑块左侧空白：向左翻一页
+            else if (x > knobX + kh)  m_leftCol += page;          // 滑块右侧空白：向右翻一页
+            else { m_dragH = true; m_dragStart = x - knobX; }     // 按在滑块上：开始拖动
+            int maxLeft = (total - page > 0) ? (total - page) : 0;
+            m_leftCol = clampi(m_leftCol, 0, maxLeft);
+        }
         return;
     }
 
-    // ---- 7. 编辑区：定位光标 / 开始拖拽选区 ----
-    if (rEdit().hit(x, y))
+    // ---------- 7. 编辑区：定位光标 / 开始选择 ----------
+    if (rText().hit(x, y))
     {
         m_focus = FOCUS_EDITOR;
-        int row, col;
+        int row = 0, col = 0;
         screenToDoc(x, y, row, col);
-        bufSetCursor(buffer, row, col);
-        m_anchorR = row; m_anchorC = col;
-        m_selActive = false;
+        bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (!shift)
+        {
+            m_anchorR = row; m_anchorC = col;
+            clearSelection();
+        }
+        else if (!m_selActive)
+        {
+            m_anchorR = api.bufRow(); m_anchorC = api.bufCol();
+        }
+        api.bufSetCursor(row, col);
         m_dragging = true;
-        m_wantCol = -1;
+        scrollToCursor();
         return;
     }
 }
@@ -1188,287 +852,879 @@ void MainWindow::onMouseUp(int, int)
 
 void MainWindow::onMouseMove(int x, int y)
 {
-    m_mouseX = x; m_mouseY = y;
-
-    // 菜单项悬停
-    m_hoverMenu = -1; m_hoverItem = -1;
-    if (m_openMenu >= 0)
+    // 拖拽选区
+    if (m_dragging)
     {
-        for (int i = 0; i < (int)m_menus[m_openMenu].items.size(); i++)
-            if (dropItemRect(m_openMenu, i).hit(x, y)) { m_hoverItem = i; break; }
-    }
-    else if (rMenu().hit(x, y))
-    {
-        m_hoverMenu = x / UI_MENU_TITLE_W;
-        if (m_hoverMenu >= (int)m_menus.size()) m_hoverMenu = -1;
-    }
-
-    // 拖动垂直滚动条（编辑区 / 底部面板各有一个，用 m_dragInBottom 区分）
-    if (m_dragV)
-    {
-        if (m_dragInBottom)
-        {
-            int track = rBottomScroll().h();
-            int delta = y - m_dragStart;
-            int& top = (m_bottomTab == 0) ? m_diagTop : m_consoleTop;
-            int total = (m_bottomTab == 0) ? (int)m_diagnostics.size() : (int)m_console.size();
-            int page  = rBottomBody().h() / ((m_bottomTab == 0) ? 20 : 18);
-            int maxPos = total - page;
-            if (maxPos > 0 && track > 0) top += delta * maxPos / track;
-            if (top < 0) top = 0;
-            if (top > maxPos) top = maxPos;
-            m_dragStart = y;
-        }
-        else
-        {
-            int total = buffer->getLineCount();
-            int page  = visibleLines();
-            if (total > page)
-            {
-                int track = rVScroll().h();
-                int delta = y - m_dragStart;
-                int maxPos = total - page;
-                m_topLine += delta * maxPos / (track > 0 ? track : 1);
-                if (m_topLine < 0) m_topLine = 0;
-                if (m_topLine > maxPos) m_topLine = maxPos;
-                m_dragStart = y;
-            }
-        }
-        return;
-    }
-
-    // 拖动水平滚动条
-    if (m_dragH)
-    {
-        int delta = (x - m_dragStart) / (m_charW > 0 ? m_charW : 8);
-        m_leftCol -= delta;
-        if (m_leftCol < 0) m_leftCol = 0;
-        m_dragStart = x;
-        return;
-    }
-
-    // 在编辑区里拖拽 → 扩展选区
-    if (m_dragging && rEdit().hit(x, y))
-    {
-        int row, col;
+        if (!m_selActive) { m_selActive = true; }
+        int row = 0, col = 0;
         screenToDoc(x, y, row, col);
+        CoreApi::inst().bufSetCursor(row, col);
         m_selR1 = m_anchorR; m_selC1 = m_anchorC;
         m_selR2 = row;       m_selC2 = col;
         normalizeSel();
-        m_selActive = (m_selR1 != m_selR2 || m_selC1 != m_selC2);
-        bufSetCursor(buffer, row, col);
-        syncSelToBuffer();
+        scrollToCursor();
+        return;
+    }
+
+    // 拖拽垂直滚动条
+    if (m_dragV)
+    {
+        CoreApi& api = CoreApi::inst();
+        Rect r = rVScroll();
+        int total = api.bufLineCount();
+        int page  = visibleLines();
+        if (total > page)
+        {
+            int track = r.h();
+            int kh = (int)((double)track * page / total);
+            if (kh < 24) kh = 24;
+            int maxp = track - kh;
+            int ny = y - m_dragStart - r.y1;
+            m_topLine = (maxp > 0) ? (int)((double)ny * (total - page) / maxp) : 0;
+            m_topLine = clampi(m_topLine, 0, total - page);
+        }
+        return;
+    }
+    if (m_dragH)
+    {
+        // 与垂直拖动同一套算法：由滑块当前位置反算滚动偏移，再钳到 [0, total-page]。
+        // 旧代码是 m_leftCol -= dx：① 方向反了 ② 只钳下界不钳上界 -> 内容能被无限往右推。
+        Rect r = rHScroll();
+        int total = maxLineCols();
+        int page  = hPageCols();
+        if (total > page)
+        {
+            int track = r.w();
+            int kh = (int)((double)track * page / total);
+            if (kh < 24) kh = 24;
+            int maxp = track - kh;
+            int nx = x - m_dragStart - r.x1;      // 滑块左上角相对轨道的偏移
+            m_leftCol = (maxp > 0) ? (int)((double)nx * (total - page) / maxp) : 0;
+            m_leftCol = clampi(m_leftCol, 0, total - page);
+        }
+        return;
+    }
+
+    // 菜单展开时，鼠标滑过标题自动切换
+    if (m_openMenu >= 0 && rMenu().hit(x, y))
+    {
+        int idx = x / UI_MENU_TITLE_W;
+        if (idx >= 0 && idx < (int)m_menus.size() && idx != m_openMenu) m_openMenu = idx;
     }
 }
 
 void MainWindow::onWheel(int delta)
 {
-    if (rEdit().hit(m_mouseX, m_mouseY) || m_focus == FOCUS_EDITOR)
+    int d = delta / 120;
+    if (d == 0) d = (delta > 0 ? 1 : -1);
+
+    if (rBottom().hit(m_mouseX, m_mouseY))
     {
-        int step = (delta > 0) ? -3 : 3;
-        m_topLine += step;
-        int maxTop = buffer->getLineCount() - 1;
-        if (m_topLine < 0) m_topLine = 0;
-        if (m_topLine > maxTop) m_topLine = maxTop;
+        int total = (m_bottomTab == 0) ? (int)m_diagnostics.size() : (int)m_console.size();
+        int page  = (m_bottomTab == 0) ? (rBottomBody().h() / 22) : (rConsoleBody().h() / 18);
+        int& top  = (m_bottomTab == 0) ? m_diagTop : m_consoleTop;
+        top -= d * 2;
+        top = clampi(top, 0, (total > page ? total - page : 0));
+        return;
     }
-    else if (rBottom().hit(m_mouseX, m_mouseY))
-    {
-        int step = (delta > 0) ? -3 : 3;
-        if (m_bottomTab == 0) m_diagTop += step;
-        else                  m_consoleTop += step;
-        if (m_diagTop < 0) m_diagTop = 0;
-        if (m_consoleTop < 0) m_consoleTop = 0;
-    }
+
+    CoreApi& api = CoreApi::inst();
+    int total = api.bufLineCount();
+    int page  = visibleLines();
+    m_topLine -= d * 3;
+    m_topLine = clampi(m_topLine, 0, (total > page ? total - page : 0));
 }
 
-// ============================================================================
-//  键盘（A 原有 handleKeyPress，函数体由 C 实现）
-//  A 原来的 13 行逻辑（可打印字符 / 退格 / 删除 / 回车 / 四个方向键）
-//  已完整保留在 onKeyDown + onCharInput 中，并补齐了
-//  Home/End、翻页、Tab、Ctrl 组合、查找替换等。
-// ============================================================================
-void MainWindow::handleKeyPress(int key)
+void MainWindow::onKeyDown(int vk, bool ctrl, bool shift, bool alt)
 {
-    bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    bool shift = (GetKeyState(VK_SHIFT)   & 0x8000) != 0;
-    onKeyDown(key, ctrl, shift);
-}
+    CoreApi& api = CoreApi::inst();
 
-void MainWindow::onKeyDown(int vk, bool ctrl, bool shift)
-{
-    // ---------- Ctrl 组合 ----------
+    // ---------- 菜单打开时的键盘操作 ----------
+    if (m_openMenu >= 0)
+    {
+        if (vk == VK_ESCAPE) m_openMenu = -1;
+        else if (vk == VK_LEFT)  { m_openMenu = (m_openMenu - 1 + (int)m_menus.size()) % (int)m_menus.size(); }
+        else if (vk == VK_RIGHT) { m_openMenu = (m_openMenu + 1) % (int)m_menus.size(); }
+        return;
+    }
+
+    // ---------- Alt + F4 ----------
+    if (alt && vk == VK_F4) { doExit(); return; }
+
+    // ---------- 全局快捷键 ----------
     if (ctrl)
     {
+        // 粘贴按当前焦点分发到不同的输入框
+        if (vk == 'V')
+        {
+            std::string t = getClipboardText();
+            if (!t.empty())
+            {
+                if      (m_focus == FOCUS_FIND)    { m_findText += t;    return; }
+                else if (m_focus == FOCUS_REPLACE) { m_replaceText += t; return; }
+                else if (m_focus == FOCUS_CONSOLE) { m_inputLine += t;   return; }
+            }
+        }
         switch (vk)
         {
-        case 'N': onCommand(CMD_FILE_NEW);   return;
-        case 'O': onCommand(CMD_FILE_OPEN);  return;
-        case 'S': onCommand(shift ? CMD_FILE_SAVEAS : CMD_FILE_SAVE); return;
-        case 'A': onCommand(CMD_EDIT_SELALL);return;
-        case 'Z': onCommand(CMD_EDIT_UNDO);  return;
-        case 'Y': onCommand(CMD_EDIT_REDO);  return;
-        case 'X': onCommand(CMD_EDIT_CUT);   return;
-        case 'C': onCommand(CMD_EDIT_COPY);  return;
-        case 'V': onCommand(CMD_EDIT_PASTE); return;
-        case 'F': onCommand(CMD_FIND);       return;
-        case 'H': onCommand(shift ? CMD_REPLACE_ALL : CMD_REPLACE); return;
-        case 'W': doExit();                  return;
+        case 'N': execCmd(CMD_FILE_NEW);   return;
+        case 'O': execCmd(CMD_FILE_OPEN);  return;
+        case 'S': execCmd(shift ? CMD_FILE_SAVEAS : CMD_FILE_SAVE); return;
+        case 'Z': execCmd(shift ? CMD_EDIT_REDO : CMD_EDIT_UNDO); clearSelection(); scrollToCursor(); return;
+        case 'Y': execCmd(CMD_EDIT_REDO);  clearSelection(); scrollToCursor(); return;
+        case 'A': execCmd(CMD_EDIT_SELALL);return;
+        case 'C': execCmd(CMD_EDIT_COPY);  return;
+        case 'X': execCmd(CMD_EDIT_CUT);   scrollToCursor(); return;
+        case 'V': execCmd(CMD_EDIT_PASTE); scrollToCursor(); return;
+        case 'F': execCmd(CMD_FIND);       return;
+        case 'H': execCmd(CMD_REPLACE);    return;
+        case 'B': execCmd(CMD_COMPILE);    return;
+        case 'R': if (shift && m_findVisible) execCmd(CMD_REPLACE_ALL); else execCmd(CMD_RUN); return;
+        case 'T': execCmd(CMD_THEME);      return;
+        case 'W': execCmd(CMD_FILE_CLOSE); return;
         default: break;
         }
-        if (vk == VK_F5) { onCommand(CMD_COMPILE_RUN); return; }
+    }
+    if (vk == VK_F1) { execCmd(CMD_ABOUT); return; }
+    if (vk == VK_F3) { if (!m_findVisible) { m_findVisible = true; m_focus = FOCUS_FIND; } searchNext(!shift); return; }
+    if (vk == VK_F5) { execCmd(ctrl ? CMD_COMPILE_RUN : CMD_RUN); return; }
+    if (vk == VK_F7) { execCmd(CMD_COMPILE); return; }
+    if (vk == VK_F4) { if (m_findVisible) execCmd(CMD_REPLACE_ONE); return; }
+    if (vk == VK_ESCAPE)
+    {
+        if (m_findVisible) { m_findVisible = false; m_focus = FOCUS_EDITOR; return; }
+        if (m_selActive)   { clearSelection(); return; }
         return;
     }
 
-    // ---------- 单键 ----------
-    switch (vk)
+    // ---------- 查找框 / 替换框 ----------
+    if (m_focus == FOCUS_FIND || m_focus == FOCUS_REPLACE)
     {
-    case VK_LEFT:
-        if (m_selActive && !shift) { clearSel(); break; }
-        bufMoveLeft(buffer);
-        m_wantCol = -1;
-        break;
-    case VK_RIGHT:
-        if (m_selActive && !shift) { clearSel(); break; }
-        bufMoveRight(buffer);
-        m_wantCol = -1;
-        break;
-    case VK_UP:
-        m_wantCol = bufMoveUp(buffer, m_wantCol);
-        break;
-    case VK_DOWN:
-        m_wantCol = bufMoveDown(buffer, m_wantCol);
-        break;
-    case VK_HOME: bufHome(buffer); m_wantCol = -1; break;
-    case VK_END:  bufEnd(buffer);  m_wantCol = -1; break;
-    case VK_PRIOR:   // PageUp
-    {
-        int page = visibleLines();
-        int r = buffer->getCursorY() - page;
-        if (r < 0) r = 0;
-        bufSetCursor(buffer, r, buffer->getCursorX());
-        m_topLine -= page;
-        if (m_topLine < 0) m_topLine = 0;
-        break;
-    }
-    case VK_NEXT:    // PageDown
-    {
-        int page = visibleLines();
-        int r = buffer->getCursorY() + page;
-        if (r >= buffer->getLineCount()) r = buffer->getLineCount() - 1;
-        bufSetCursor(buffer, r, buffer->getCursorX());
-        m_topLine += page;
-        break;
-    }
-    case VK_DELETE:
-        if (m_selActive) deleteSel();
-        else             buffer->deleteForward();
-        break;
-    case VK_BACK:                       // A 原有：退格
-        if (m_selActive) deleteSel();
-        else             buffer->deleteChar();
-        break;
-    case VK_TAB:
-        deleteSel();
-        bufInsertString(buffer, "    ");
-        break;
-    case VK_ESCAPE:
-        if (m_findVisible) { m_findVisible = false; m_focus = FOCUS_EDITOR; }
-        else if (m_selActive) clearSel();
-        break;
-    case VK_F1: onCommand(CMD_ABOUT);   break;
-    case VK_F3: onCommand(shift ? CMD_FIND_PREV : CMD_FIND_NEXT); break;
-    case VK_F5: onCommand(CMD_RUN);     break;
-    case VK_F9: onCommand(CMD_COMPILE); break;
-    default: break;
+        if (vk == VK_RETURN) { searchNext(!shift); return; }
+        if (vk == VK_TAB)    { m_focus = (m_focus == FOCUS_FIND) ? FOCUS_REPLACE : FOCUS_FIND; return; }
+        if (vk == VK_BACK)
+        {
+            std::string& s = (m_focus == FOCUS_FIND) ? m_findText : m_replaceText;
+            if (!s.empty())
+            {
+                // 同 deleteChar：必须扫描定位，不能靠 isDbcsLead 猜
+                int st = charStartBefore(s, (int)s.size());
+                s.erase(st);
+            }
+            return;
+        }
+        return;   // 其余交给 WM_CHAR
     }
 
-    scrollToCursor();
-}
-
-// 可打印字符（含中文）入口；由 mainLoop 的 WM_CHAR 调用
-void MainWindow::onCharInput(unsigned int code)
-{
-    if (code == 0) return;
-
-    // 查找条处于焦点时，字符进输入框
-    if (m_focus == FOCUS_FIND && code >= 32)
+    // ---------- 控制台输入 ----------
+    if (m_focus == FOCUS_CONSOLE)
     {
-        m_findText += (char)code;
-        m_hasMatch = false;
-        return;
-    }
-    if (m_focus == FOCUS_REPLACE && code >= 32)
-    {
-        m_replaceText += (char)code;
-        return;
-    }
-    if (m_focus == FOCUS_CONSOLE && code >= 32)
-    {
-        m_inputLine += (char)code;
-        return;
-    }
-
-    // 回车：Enter（在 WM_CHAR 里统一处理，避免和 VK_RETURN 重复）
-    if (code == '\r' || code == '\n')
-    {
-        if (m_focus == FOCUS_FIND)    { onCommand(CMD_FIND_NEXT); return; }
-        if (m_focus == FOCUS_REPLACE) { onCommand(CMD_REPLACE_ONE); return; }
-        if (m_focus == FOCUS_CONSOLE)
+        if (vk == VK_RETURN)
         {
             appendConsole("> " + m_inputLine);
-            if (m_progRunning) CoreApi::inst().runSendInput(m_inputLine);
+            if (m_progRunning)
+                CoreApi::inst().runSendInput(m_inputLine);
+            else
+                appendConsole("[提示] 当前没有正在运行的程序，输入被忽略。请先按 F5 运行。");
             m_inputLine.clear();
             return;
         }
-        deleteSel();
-        buffer->enter();
-        scrollToCursor();
+        if (vk == VK_BACK && !m_inputLine.empty())
+        {
+            int st = charStartBefore(m_inputLine, (int)m_inputLine.size());
+            m_inputLine.erase(st);
+            return;
+        }
         return;
     }
 
-    if (code < 32) return;      // 其余控制字符交给 onKeyDown
-
-    // 中文（GBK 双字节）：先收下首字节，等第二个字节到齐再一起插入
-    unsigned char c = (unsigned char)code;
-    if (!m_dbcsPending.empty())
+    // ---------- 编辑器 ----------
+    switch (vk)
     {
-        std::string two = m_dbcsPending + (char)c;
+    case VK_LEFT:
+        if (shift && !m_selActive) { m_selActive = true; m_anchorR = api.bufRow(); m_anchorC = api.bufCol(); }
+        api.bufMoveCursor(-1, 0);
+        break;
+    case VK_RIGHT:
+        if (shift && !m_selActive) { m_selActive = true; m_anchorR = api.bufRow(); m_anchorC = api.bufCol(); }
+        api.bufMoveCursor(1, 0);
+        break;
+    case VK_UP:
+        if (shift && !m_selActive) { m_selActive = true; m_anchorR = api.bufRow(); m_anchorC = api.bufCol(); }
+        api.bufMoveCursor(0, -1);
+        break;
+    case VK_DOWN:
+        if (shift && !m_selActive) { m_selActive = true; m_anchorR = api.bufRow(); m_anchorC = api.bufCol(); }
+        api.bufMoveCursor(0, 1);
+        break;
+    case VK_HOME:
+        if (ctrl) { api.bufSetCursor(0, 0); }                     // Ctrl+Home：跳到文档开头
+        else      { api.bufSetCursor(api.bufRow(), 0); }
+        break;
+    case VK_END:
+        if (ctrl)                                                  // Ctrl+End：跳到文档末尾
+        {
+            int lr = api.bufLineCount() - 1;
+            if (lr < 0) lr = 0;
+            api.bufSetCursor(lr, (int)api.bufGetLine(lr).size());
+        }
+        else { api.bufSetCursor(api.bufRow(), (int)api.bufGetLine(api.bufRow()).size()); }
+        break;
+    case VK_PRIOR:   // PageUp
+        api.bufSetCursor(api.bufRow() - visibleLines(), api.bufCol());
+        break;
+    case VK_NEXT:    // PageDown
+        api.bufSetCursor(api.bufRow() + visibleLines(), api.bufCol());
+        break;
+    case VK_BACK:
+        if (m_selActive) { deleteSelection(); }
+        else api.bufDeleteBack();
+        break;
+    case VK_DELETE:
+        if (m_selActive) { deleteSelection(); }
+        else api.bufDeleteForward();
+        break;
+    case VK_RETURN:
+        if (m_selActive) deleteSelection();
+        api.bufEnter();
+        break;
+    case VK_TAB:
+        if (m_selActive) deleteSelection();
+        api.bufInsertString("    ");
+        break;
+    default:
+        return;
+    }
+
+    // 选区随光标更新
+    if (shift && m_selActive)
+    {
+        m_selR1 = m_anchorR; m_selC1 = m_anchorC;
+        m_selR2 = api.bufRow(); m_selC2 = api.bufCol();
+        normalizeSel();
+    }
+    else if (m_selActive && vk != VK_BACK && vk != VK_DELETE)
+    {
+        clearSelection();
+    }
+    scrollToCursor();
+}
+
+void MainWindow::onCharInput(unsigned int code)
+{
+    std::string bytes;
+#ifdef UNICODE
+    if (code < 128) bytes = std::string(1, (char)code);
+    else            bytes = w2s(std::wstring(1, (wchar_t)code));
+#else
+    unsigned char b = (unsigned char)(code & 0xFF);
+    if (b < 0x80) bytes = std::string(1, (char)b);
+    else if (GetTickCount() < m_imeGuardUntil)
+    {
+        // 刚刚由 IME 提交过，这里的 WM_CHAR 是重复的一份，丢弃
         m_dbcsPending.clear();
-        deleteSel();
-        bufInsertString(buffer, two);
-        scrollToCursor();
         return;
     }
-    if (c >= 0x81 && c <= 0xFE)
+    else
     {
-        m_dbcsPending = std::string(1, (char)c);
-        return;
+        m_dbcsPending += (char)b;
+        if ((int)m_dbcsPending.size() >= 2) { bytes = m_dbcsPending; m_dbcsPending.clear(); }
+        else return;
     }
+#endif
+    if (bytes.empty()) return;
+    if (bytes[0] < 32) return;   // 所有控制字符（含 Tab/回车/退格）都由 WM_KEYDOWN 统一处理
 
-    // 普通 ASCII 字符（A 原有：buffer->insertChar）
-    deleteSel();
-    bufInsertString(buffer, std::string(1, (char)c));
+    if (m_focus == FOCUS_FIND)         { m_findText += bytes; return; }
+    if (m_focus == FOCUS_REPLACE)      { m_replaceText += bytes; return; }
+    if (m_focus == FOCUS_CONSOLE)      { m_inputLine += bytes; return; }
+
+    // 编辑器
+    if (m_selActive) deleteSelection();
+    CoreApi::inst().bufInsertString(bytes);
     scrollToCursor();
 }
 
 // ============================================================================
-//  命令分发（菜单 / 工具栏 / 快捷键 共用同一套）
+//  绘制
 // ============================================================================
-void MainWindow::onCommand(int cmd)
+void MainWindow::render()
 {
+    setbkmode(TRANSPARENT);
+    setbkcolor(th->bg);
+    cleardevice();
+
+    drawEditor();
+    if (m_findVisible) drawFindBar();
+    drawBottom();
+    drawToolbar();
+    drawMenuBar();
+    drawStatusBar();
+    if (m_openMenu >= 0) drawDropdown();   // 下拉菜单永远在最上层
+
+    FlushBatchDraw();
+}
+
+void MainWindow::drawMenuBar()
+{
+    Rect r = rMenu();
+    fillRect(r, th->menuBg);
+    setlinecolor(th->border);
+    line(0, r.y2, m_w, r.y2);
+
+    settextstyle(14, 0, _T("Microsoft YaHei"));
+    for (int i = 0; i < (int)m_menus.size(); i++)
+    {
+        Rect t(i * UI_MENU_TITLE_W, r.y1, (i + 1) * UI_MENU_TITLE_W, r.y2);
+        bool active = (m_openMenu == i) || (m_openMenu < 0 && t.hit(m_mouseX, m_mouseY));
+        if (active) fillRect(Rect(t.x1 + 2, t.y1 + 2, t.x2 - 2, t.y2 - 2), th->menuHover);
+        settextcolor(active ? th->menuTextHover : th->menuText);
+        drawStrCenter(t, m_menus[i].title);
+    }
+}
+
+void MainWindow::drawDropdown()
+{
+    if (m_openMenu < 0) return;
+    Rect d = dropRect(m_openMenu);
+
+    // 阴影
+    fillRoundRect(Rect(d.x1 + 3, d.y1 + 3, d.x2 + 3, d.y2 + 3), 8, RGB(0, 0, 0));
+    fillRoundRect(d, 8, th->panel);
+    setlinecolor(th->border);
+    // 边框用直线近似
+    line(d.x1 + 8, d.y1, d.x2 - 8, d.y1);
+    line(d.x1 + 8, d.y2, d.x2 - 8, d.y2);
+
+    settextstyle(14, 0, _T("Microsoft YaHei"));
+    for (int i = 0; i < (int)m_menus[m_openMenu].items.size(); i++)
+    {
+        const MenuItem& it = m_menus[m_openMenu].items[i];
+        Rect ir = dropItemRect(m_openMenu, i);
+        bool hv = ir.hit(m_mouseX, m_mouseY);
+        if (hv) fillRoundRect(Rect(ir.x1, ir.y1 + 1, ir.x2, ir.y2 - 1), 4, th->menuHover);
+        settextcolor(hv ? th->menuTextHover : th->menuText);
+        drawStr(ir.x1 + 12, ir.y1 + 4, it.label);
+        if (!it.hot.empty())
+        {
+            settextcolor(hv ? th->menuTextHover : th->dim);
+            int w = strWidth(it.hot);
+            drawStr(ir.x2 - 10 - w, ir.y1 + 4, it.hot);
+        }
+    }
+}
+
+void MainWindow::drawToolbar()
+{
+    Rect t = rTool();
+    fillRect(t, th->menuBg);
+    setlinecolor(th->border);
+    line(0, t.y2, m_w, t.y2);
+
+    settextstyle(13, 0, _T("Microsoft YaHei"));
+    int x = 8;
+    for (int i = 0; i < (int)m_tools.size(); i++)
+    {
+        if (m_tools[i].cmd == CMD_NONE)
+        {
+            setlinecolor(th->border);
+            line(x + 6, t.y1 + 8, x + 6, t.y2 - 8);
+            x += 14;
+            continue;
+        }
+        Rect b = toolBtnRect(i);
+        bool hv = b.hit(m_mouseX, m_mouseY);
+        fillRoundRect(b, 5, hv ? th->btnHover : th->btn);
+        setlinecolor(th->btnBorder);
+        // 用直线近似边框
+        line(b.x1 + 5, b.y1, b.x2 - 5, b.y1);
+        line(b.x1 + 5, b.y2, b.x2 - 5, b.y2);
+        settextcolor(th->btnText);
+        drawStrCenter(b, m_tools[i].label);
+        x = b.x2 + 6;
+    }
+}
+
+void MainWindow::drawEditor()
+{
+    CoreApi& api = CoreApi::inst();
+    Rect e = rEdit(), t = rText(), g = rGutter();
+
+    fillRectB(e, th->panel, th->border);
+    fillRect(g, th->gutterBg);
+    setlinecolor(th->border);
+    line(g.x2, e.y1, g.x2, e.y2);
+
+    int total = api.bufLineCount();
+    int vis   = visibleLines();
+    int crow  = api.bufRow();
+
+    // 当前行底色
+    if (crow >= m_topLine && crow < m_topLine + vis)
+    {
+        int y = t.y1 + (crow - m_topLine) * UI_LINE_H;
+        fillRect(Rect(g.x1, y, g.x2, y + UI_LINE_H), mixColor(th->gutterBg, th->accent, 0.10));
+        fillRect(Rect(t.x1, y, t.x2, y + UI_LINE_H), th->curLine);
+    }
+
+    {
+        // 裁剪区域要覆盖"行号栏 + 文本区"，否则行号会被裁掉
+        Rect clipAll(e.x1, t.y1, e.x2, t.y2);
+        ClipGuard cg(clipAll);
+        setbkmode(TRANSPARENT);
+
+        // 计算进入可见区首行时是否处于块注释中（带缓存：顶行变化或每 15 帧重算一次）
+        bool inBlock;
+        if (m_blockTopCache == m_topLine && (m_tick - m_blockFrameCache) < 15)
+        {
+            inBlock = m_blockValCache;
+        }
+        else
+        {
+            std::vector<Tok> dummy;
+            bool tmp = false;
+            inBlock = false;
+            for (int i = 0; i < m_topLine; i++)
+            {
+                std::string s = api.bufGetLine(i);
+                dummy.clear();
+                tokenizeLine(s, inBlock, dummy, tmp);
+                inBlock = tmp;
+            }
+            m_blockTopCache  = m_topLine;
+            m_blockValCache  = inBlock;
+            m_blockFrameCache = m_tick;
+        }
+
+        for (int i = m_topLine; i < total && i < m_topLine + vis; i++)
+        {
+            int y = t.y1 + (i - m_topLine) * UI_LINE_H;
+
+            // 行号
+            settextcolor(i == crow ? th->text : th->gutterText);
+            settextstyle(12, 0, _T("Consolas"));
+            std::string num = itos(i + 1);
+            int nw = strWidth(num);
+            drawStr(g.x2 - 10 - nw, y + 4, num);
+
+            // 有诊断的行画一个标记点
+            for (size_t k = 0; k < m_diagnostics.size(); k++)
+            {
+                if (m_diagnostics[k].line == i)
+                {
+                    setfillcolor(m_diagnostics[k].level == DIAG_ERROR ? th->err : th->warn);
+                    solidcircle(g.x1 + 8, y + UI_LINE_H / 2, 3);
+                    break;
+                }
+            }
+
+            // 代码
+            settextstyle(UI_FONT_H, 0, _T("Consolas"));
+            drawCodeLine(t.x1 + 6, y, i, t, inBlock);
+            // 把块注释状态传递到下一行
+            {
+                std::vector<Tok> d2; bool ob = false;
+                tokenizeLine(api.bufGetLine(i), inBlock, d2, ob);
+                inBlock = ob;
+            }
+        }
+
+        // 光标
+        if (m_focus == FOCUS_EDITOR && (m_tick % 30) < 18)
+        {
+            std::string L = api.bufGetLine(crow);
+            int dcol = dispColOfIndex(L, api.bufCol());
+            int cx = t.x1 + 6 + (dcol - m_leftCol) * m_charW;
+            int cy = t.y1 + (crow - m_topLine) * UI_LINE_H + 2;
+            setlinecolor(th->text);
+            line(cx, cy, cx, cy + UI_LINE_H - 4);
+        }
+    }
+
+    // 滚动条
+    drawScrollbar(rVScroll(), m_topLine, total, vis, true);
+    // 水平滚动：以最长行为为准（与命中测试/拖动共用同一套 total/page）
+    drawScrollbar(rHScroll(), m_leftCol, maxLineCols(), hPageCols(), false);
+
+    // 编译中 / 运行中的遮罩提示
+    if (m_compiling)
+    {
+        settextcolor(th->accent);
+        settextstyle(15, 0, _T("Microsoft YaHei"));
+        drawStr(t.x1 + 12, t.y1 + 8, "正在编译，请稍候...");
+    }
+}
+
+void MainWindow::drawCodeLine(int x, int y, int row, const Rect& clip, bool inBlock)
+{
+    CoreApi& api = CoreApi::inst();
+    std::string s = api.bufGetLine(row);
+    int n = (int)s.size();
+
+    // ---- 本行的选区范围 ----
+    int sc1 = -1, sc2 = -1;
+    if (m_selActive && row >= m_selR1 && row <= m_selR2)
+    {
+        sc1 = (row == m_selR1) ? m_selC1 : 0;
+        sc2 = (row == m_selR2) ? m_selC2 : n;
+        if (sc1 > n) sc1 = n;
+        if (sc2 > n) sc2 = n;
+    }
+
+    // ---- 选区底色 ----
+    if (sc1 >= 0 && sc2 >= sc1)
+    {
+        int a = dispColOfIndex(s, sc1);
+        int b = dispColOfIndex(s, sc2);
+        int xa = x + (a - m_leftCol) * m_charW;
+        int xb = x + (b - m_leftCol) * m_charW;
+        if (xb <= xa) xb = xa + 3;
+        if (xb > clip.x2) xb = clip.x2;
+        if (xa < clip.x1) xa = clip.x1;
+        if (xb > xa) fillRect(Rect(xa, y, xb, y + UI_LINE_H), th->sel);
+    }
+
+    // ---- 查找命中高亮 ----
+    if (m_hasMatch && m_matchR == row && !m_findText.empty())
+    {
+        int a = dispColOfIndex(s, clampi(m_matchC, 0, n));
+        int b = a + (int)m_findText.size();
+        int xa = x + (a - m_leftCol) * m_charW;
+        int xb = x + (b - m_leftCol) * m_charW;
+        if (xa < clip.x1) xa = clip.x1;
+        if (xb > clip.x2) xb = clip.x2;
+        if (xb > xa)
+        {
+            setlinecolor(th->warn);
+            rectangle(xa, y + 1, xb, y + UI_LINE_H - 1);
+        }
+    }
+
+    // ---- 词法着色 ----
+    std::vector<Tok> toks;
+    bool outBlock = false;
+    tokenizeLine(s, inBlock, toks, outBlock);
+
+    for (size_t k = 0; k < toks.size(); k++)
+    {
+        const Tok& tk = toks[k];
+        COLORREF base = tokColor(*th, tk.t);
+
+        // 把 token 按选区切成 3 段：选区前 / 选区内 / 选区后
+        int segs[4][2] = { { tk.b0, tk.b1 }, { 0, 0 }, { 0, 0 }, { 0, 0 } };
+        int segCount = 1;
+        if (sc1 >= 0 && sc1 < tk.b1 && sc2 > tk.b0)
+        {
+            int p1 = (sc1 > tk.b0) ? sc1 : tk.b0;
+            int p2 = (sc2 < tk.b1) ? sc2 : tk.b1;
+            segs[0][0] = tk.b0;  segs[0][1] = p1;
+            segs[1][0] = p1;     segs[1][1] = p2;
+            segs[2][0] = p2;     segs[2][1] = tk.b1;
+            segCount = 3;
+        }
+        for (int q = 0; q < segCount; q++)
+        {
+            int a = segs[q][0], b = segs[q][1];
+            if (b <= a) continue;
+            COLORREF col = (q == 1) ? th->selText : base;
+
+            // 水平裁剪：完全在可视区外则跳过（其余交给 ClipGuard 裁掉）
+            int ca = dispColOfIndex(s, a) - m_leftCol;
+            int cb = dispColOfIndex(s, b) - m_leftCol;
+            if (x + cb * m_charW < clip.x1) continue;
+            if (x + ca * m_charW > clip.x2) continue;
+
+            settextcolor(col);
+            outtextxy(x + ca * m_charW, y + (UI_LINE_H - UI_FONT_H) / 2,
+                      ts(s.substr(a, b - a)).c_str());
+        }
+    }
+}
+
+void MainWindow::drawFindBar()
+{
+    FindLayout L = findLayout();
+    Rect bar = L.bar;
+    fillRectB(bar, mixColor(th->panel, th->accent, 0.06), th->border);
+    setlinecolor(th->border);
+    line(bar.x1, bar.y2, bar.x2, bar.y2);
+
+    settextstyle(14, 0, _T("Microsoft YaHei"));
+
+    // 输入框
+    fillRectB(L.fInput, th->panel, (m_focus == FOCUS_FIND) ? th->accent : th->border);
+    fillRectB(L.rInput, th->panel, (m_focus == FOCUS_REPLACE) ? th->accent : th->border);
+    settextcolor(th->text);
+    drawStr(L.fInput.x1 + 6, L.fInput.y1 + 3, m_findText);
+    drawStr(L.rInput.x1 + 6, L.rInput.y1 + 3, m_replaceText);
+    // 输入光标
+    if ((m_tick % 30) < 18)
+    {
+        if (m_focus == FOCUS_FIND)
+        {
+            int cx = L.fInput.x1 + 6 + strWidth(m_findText);
+            setlinecolor(th->text); line(cx, L.fInput.y1 + 3, cx, L.fInput.y2 - 3);
+        }
+        else if (m_focus == FOCUS_REPLACE)
+        {
+            int cx = L.rInput.x1 + 6 + strWidth(m_replaceText);
+            setlinecolor(th->text); line(cx, L.rInput.y1 + 3, cx, L.rInput.y2 - 3);
+        }
+    }
+
+    // 标签
+    settextcolor(th->dim);
+    drawStr(L.fInput.x1 - 46, L.fInput.y1 + 3, "查找:");
+    drawStr(L.rInput.x1 - 46, L.rInput.y1 + 3, "替换:");
+
+    // 复选框
+    fillRectB(L.chk, th->panel, th->border);
+    if (m_caseSensitive)
+    {
+        setlinecolor(th->accent);
+        line(L.chk.x1 + 3, L.chk.y1 + 8, L.chk.x1 + 7, L.chk.y2 - 5);
+        line(L.chk.x1 + 7, L.chk.y2 - 5, L.chk.x2 - 3, L.chk.y1 + 3);
+    }
+    settextcolor(th->text);
+    drawStr(L.chk.x2 + 6, L.chk.y1, "区分大小写");
+
+    // 按钮
+    struct B { Rect r; const char* t; };
+    B bs[] = { { L.bPrev, "<" }, { L.bNext, ">" }, { L.bRep, "替换" },
+               { L.bRepAll, "全部替换" }, { L.bClose, "X" } };
+    for (int i = 0; i < 5; i++)
+    {
+        bool hv = bs[i].r.hit(m_mouseX, m_mouseY);
+        fillRoundRect(bs[i].r, 4, hv ? th->btnHover : th->btn);
+        settextcolor(th->btnText);
+        drawStrCenter(bs[i].r, bs[i].t);
+    }
+}
+
+void MainWindow::drawBottom()
+{
+    Rect b = rBottom();
+    fillRectB(b, th->panel, th->border);
+
+    // ---- 标签页 ----
+    Rect tb = rBottomTabs();
+    fillRect(tb, mixColor(th->panel, th->bg, 0.45));
+    setlinecolor(th->border);
+    line(tb.x1, tb.y2, tb.x2, tb.y2);
+
+    settextstyle(13, 0, _T("Microsoft YaHei"));
+
+    int x = tb.x1 + 8;
+    for (int i = 0; i < 2; i++)
+    {
+        std::string label = tabLabel(i);
+        int w = strWidth(label) + 26;
+        Rect t(x, tb.y1 + 3, x + w, tb.y2);
+        bool act = (m_bottomTab == i);
+        if (act) fillRoundRect(Rect(t.x1, t.y1, t.x2, t.y2 + 2), 4, th->panel);
+        settextcolor(act ? th->text : th->dim);
+        drawStr(t.x1 + 12, t.y1 + 5, label);
+        if (act)
+        {
+            setfillcolor(th->accent);
+            solidrectangle(t.x1, tb.y2 - 2, t.x2, tb.y2);
+        }
+        x += w + 4;
+    }
+
+    // ---- 内容 ----
+    if (m_bottomTab == 0) drawDiagnostics();
+    else                  drawConsole();
+
+    // ---- 滚动条 ----
+    int total = (m_bottomTab == 0) ? (int)m_diagnostics.size() : (int)m_console.size();
+    int page  = (m_bottomTab == 0) ? (rBottomBody().h() / 22) : (rConsoleBody().h() / 18);
+    int top   = (m_bottomTab == 0) ? m_diagTop : m_consoleTop;
+    drawScrollbar(rBottomScroll(), top, total, page, true);
+}
+
+void MainWindow::drawDiagnostics()
+{
+    Rect body = rBottomBody();
+    setbkmode(TRANSPARENT);
+    if (m_diagnostics.empty())
+    {
+        settextcolor(th->dim);
+        settextstyle(14, 0, _T("Microsoft YaHei"));
+        drawStr(body.x1 + 14, body.y1 + 12, "暂无诊断信息。按 F7 编译后，错误与警告会显示在这里，点击条目可跳转到源码对应行。");
+        return;
+    }
+
+    ClipGuard cg(body);
+    settextstyle(13, 0, _T("Microsoft YaHei"));
+    for (int i = m_diagTop; i < (int)m_diagnostics.size(); i++)
+    {
+        int y = body.y1 + 4 + (i - m_diagTop) * 22;
+        if (y + 22 > body.y2) break;
+        const Diagnostic& d = m_diagnostics[i];
+        Rect row(body.x1 + 4, y, body.x2 - 8, y + 20);
+        if (row.hit(m_mouseX, m_mouseY)) fillRect(row, mixColor(th->panel, th->accent, 0.10));
+
+        COLORREF c = (d.level == DIAG_ERROR) ? th->err : ((d.level == DIAG_WARNING) ? th->warn : th->dim);
+        setfillcolor(c);
+        solidcircle(body.x1 + 16, y + 10, 4);
+
+        settextcolor(c);
+        std::string tag = (d.level == DIAG_ERROR) ? "错误" : ((d.level == DIAG_WARNING) ? "警告" : "提示");
+        drawStr(body.x1 + 28, y + 3, tag);
+
+        settextcolor(th->dim);
+        drawStr(body.x1 + 72, y + 3, "行 " + itos(d.line + 1) + "  列 " + itos(d.column + 1));
+
+        settextcolor(th->text);
+        drawStr(body.x1 + 160, y + 3, d.message);
+    }
+}
+
+void MainWindow::drawConsole()
+{
+    Rect body = rConsoleBody();
+    fillRect(Rect(body.x1, body.y1, body.x2, body.y2), th->outBg);
+
+    int lh = 18;
+
+    {
+        ClipGuard cg(body);
+        setbkmode(TRANSPARENT);
+        settextstyle(14, 0, _T("Consolas"));
+        for (int i = m_consoleTop; i < (int)m_console.size(); i++)
+        {
+            int y = body.y1 + (i - m_consoleTop) * lh;
+            if (y + lh > body.y2) break;
+            settextcolor(th->outText);
+            drawStr(body.x1 + 8, y + 1, m_console[i]);
+        }
+    }
+
+    // ---- 输入行 ----
+    Rect in = rConsoleInput();
+    fillRect(in, mixColor(th->outBg, th->accent, 0.10));
+    settextstyle(14, 0, _T("Consolas"));
+    settextcolor(th->outPrompt);
+    drawStr(in.x1 + 6, in.y1 + 4, ">");
+    settextcolor(th->outText);
+    std::string shown = m_inputLine;
+    drawStr(in.x1 + 20, in.y1 + 4, shown);
+    if ((m_tick % 30) < 18)
+    {
+        int cx = in.x1 + 20 + strWidth(shown);
+        setlinecolor(th->outText);
+        line(cx, in.y1 + 4, cx, in.y2 - 4);
+    }
+    if (m_progRunning)
+    {
+        settextcolor(th->warn);
+        settextstyle(13, 0, _T("Microsoft YaHei"));
+        std::string s = "  程序运行中... 在此输入后回车可发送给程序";
+        int w = strWidth(s);
+        drawStr(in.x2 - w - 10, in.y1 + 4, s);
+    }
+}
+
+void MainWindow::drawStatusBar()
+{
+    Rect r = rStatus();
+    fillRect(r, th->statusBg);
+    setlinecolor(th->border);
+    line(0, r.y1, m_w, r.y1);
+
+    CoreApi& api = CoreApi::inst();
+    settextstyle(13, 0, _T("Microsoft YaHei"));
+    setbkmode(TRANSPARENT);
+
+    // 左：文件路径 + 脏标记
+    std::string path = api.bufPath();
+    if (path.empty()) path = "未命名.c";
+    std::string left = path + (api.bufDirty() ? "  *" : "");
+    settextcolor(th->statusText);
+    drawStr(10, r.y1 + 5, left);
+
+    // 中：行列 / 选区
+    int x = 10 + strWidth(left) + 26;
+    settextcolor(th->dim);
+    std::string pos = "行 " + itos(api.bufRow() + 1) + "，列 " + itos(api.bufCol() + 1);
+    drawStr(x, r.y1 + 5, pos);
+    x += strWidth(pos) + 26;
+    if (m_selActive)
+    {
+        int cnt = 0;
+        for (int i = m_selR1; i <= m_selR2; i++) cnt += (int)api.bufGetLine(i).size() + 1;
+        std::string s = "已选 " + itos(cnt) + " 字符";
+        drawStr(x, r.y1 + 5, s);
+    }
+
+    // 右：状态消息 + 编译状态 + 主题 + 版本
+    std::string right = std::string("主题:") + th->name + "   |   " + MINIC_VERSION;
+    int rw = strWidth(right);
+    settextcolor(th->dim);
+    drawStr(m_w - 10 - rw, r.y1 + 5, right);
+
+    std::string cs;
+    COLORREF cc = th->dim;
+    switch (m_compileState)
+    {
+    case CS_OK:         cs = "编译成功"; cc = th->ok;   break;
+    case CS_WARNING:    cs = "编译成功(有警告)"; cc = th->warn; break;
+    case CS_ERROR:      cs = "编译失败"; cc = th->err;  break;
+    case CS_NOCOMPILER: cs = "未找到编译器"; cc = th->err; break;
+    case CS_TIMEOUT:    cs = "编译超时"; cc = th->err;  break;
+    default:            cs = "未编译";  cc = th->dim;  break;
+    }
+    int cw = strWidth(cs);
+    settextcolor(cc);
+    drawStr(m_w - 20 - rw - cw, r.y1 + 5, cs);
+
+    int mw = strWidth(m_statusMsg);
+    settextcolor(m_statusColor);
+    drawStr(m_w - 30 - rw - cw - mw, r.y1 + 5, m_statusMsg);
+}
+
+void MainWindow::drawScrollbar(const Rect& r, int pos, int total, int page, bool vertical)
+{
+    if (total <= page || page <= 0)
+    {
+        fillRect(r, mixColor(th->panel, th->bg, 0.4));
+        return;
+    }
+    fillRect(r, mixColor(th->panel, th->bg, 0.4));
+
+    int track = vertical ? r.h() : r.w();
+    int kh = (int)((double)track * page / total);
+    if (kh < 24) kh = 24;
+    int maxp = track - kh;
+    int p = (total - page > 0) ? (int)((double)pos * maxp / (total - page)) : 0;
+    p = clampi(p, 0, maxp);
+
+    Rect knob = vertical ? Rect(r.x1 + 2, r.y1 + p + 1, r.x2 - 2, r.y1 + p + kh - 1)
+                         : Rect(r.x1 + p + 1, r.y1 + 2, r.x1 + p + kh - 1, r.y2 - 2);
+    bool hv = knob.hit(m_mouseX, m_mouseY) || (m_dragV && vertical) || (m_dragH && !vertical);
+    fillRoundRect(knob, 4, hv ? th->dim : mixColor(th->dim, th->panel, 0.45));
+}
+
+// ============================================================================
+//  命令分发
+// ============================================================================
+void MainWindow::execCmd(int cmd)
+{
+    CoreApi& api = CoreApi::inst();
     switch (cmd)
     {
-    // ---- 文件 ----
     case CMD_FILE_NEW:
         if (!confirmDiscard()) return;
-        buffer->loadFromString("");
-        buffer->setFilePath("");
-        buffer->setDirty(false);
+        api.fileNew();
         m_topLine = 0; m_leftCol = 0;
-        clearSel();
-        setStatus("已新建空白文件", th->ok);
+        clearSelection();
+        m_diagnostics.clear();
+        m_compileState = CS_NONE;
+        setStatus("已新建文档");
         break;
     case CMD_FILE_OPEN:
+        if (!confirmDiscard()) return;
         doOpen();
         break;
     case CMD_FILE_SAVE:
@@ -1477,90 +1733,85 @@ void MainWindow::onCommand(int cmd)
     case CMD_FILE_SAVEAS:
         doSaveAs();
         break;
+    case CMD_FILE_CLOSE:
+        doCloseDoc();
+        break;
     case CMD_EXIT:
         doExit();
         break;
 
-    // ---- 编辑 ----
     case CMD_EDIT_UNDO:
-        if (buffer->canUndo()) { clearSel(); buffer->undo(); scrollToCursor(); }
+        api.bufUndo(); clearSelection(); scrollToCursor();
+        setStatus("已撤销");
         break;
     case CMD_EDIT_REDO:
-        if (buffer->canRedo()) { clearSel(); buffer->redo(); scrollToCursor(); }
+        api.bufRedo(); clearSelection(); scrollToCursor();
+        setStatus("已重做");
         break;
     case CMD_EDIT_CUT:
-        if (hasSel()) { setClipboardText(bufSelectedText(buffer)); deleteSel(); }
+        if (m_selActive) { setClipboardText(selectedText()); deleteSelection(); scrollToCursor(); }
         break;
     case CMD_EDIT_COPY:
-        if (hasSel()) setClipboardText(bufSelectedText(buffer));
+        if (m_selActive) { setClipboardText(selectedText()); setStatus("已复制到剪贴板"); }
         break;
     case CMD_EDIT_PASTE:
     {
-        std::string t = getClipboardText();
-        if (!t.empty()) { insertAtCursor(t); scrollToCursor(); }
+        std::string txt = getClipboardText();
+        if (!txt.empty()) { insertTextAtCursor(txt); scrollToCursor(); setStatus("已粘贴"); }
         break;
     }
     case CMD_EDIT_SELALL:
     {
-        int last = buffer->getLineCount() - 1;
-        m_selR1 = 0; m_selC1 = 0;
-        m_selR2 = last; m_selC2 = buffer->getLineLength(last);
+        int total = api.bufLineCount();
         m_selActive = true;
-        syncSelToBuffer();
+        m_selR1 = 0; m_selC1 = 0;
+        m_selR2 = total - 1; m_selC2 = (int)api.bufGetLine(total - 1).size();
+        api.bufSetCursor(m_selR2, m_selC2);
         break;
     }
 
-    // ---- 查找替换 ----
     case CMD_FIND:
         m_findVisible = true;
         m_focus = FOCUS_FIND;
-        if (hasSel()) m_findText = bufSelectedText(buffer);
+        // 若已有选区，直接把选区内容带入查找框
+        if (m_selActive)
+        {
+            std::string s = selectedText();
+            if (!s.empty() && s.find('\n') == std::string::npos) m_findText = s;
+        }
         break;
     case CMD_REPLACE:
         m_findVisible = true;
         m_focus = FOCUS_REPLACE;
         break;
-    case CMD_FIND_NEXT:
-        searchNext(true);
-        break;
-    case CMD_FIND_PREV:
-        searchNext(false);
-        break;
-    case CMD_REPLACE_ONE:
-        replaceOne();
-        break;
-    case CMD_REPLACE_ALL:
-        replaceAll();
-        break;
+    case CMD_FIND_NEXT:   searchNext(true);  break;
+    case CMD_FIND_PREV:   searchNext(false); break;
+    case CMD_REPLACE_ONE: replaceOne(); break;
+    case CMD_REPLACE_ALL: replaceAll(); break;
 
-    // ---- 编译运行 ----
-    case CMD_COMPILE:
-        doCompile();
-        break;
-    case CMD_RUN:
-        doRun();
-        break;
-    case CMD_COMPILE_RUN:
-        doCompile();
-        if (m_compileState == CS_OK || m_compileState == CS_WARNING) doRun();
-        break;
-    case CMD_STOP:
-        doStop();
-        break;
+    case CMD_COMPILE:      doCompile(); break;
+    case CMD_RUN:          doRun();     break;
+    case CMD_COMPILE_RUN:  doCompile(); if (m_compileState == CS_OK || m_compileState == CS_WARNING) doRun(); break;
+    case CMD_STOP:         doStop();    break;
 
-    // ---- 视图 / 帮助 ----
     case CMD_THEME:
         m_dark = !m_dark;
         th = m_dark ? &themeDark() : &themeLight();
-        setStatus("已切换到" + std::string(th->name) + "主题", th->accent);
+        setbkcolor(th->bg);
+        setStatus("已切换到" + std::string(th->name) + "主题");
         break;
+
     case CMD_ABOUT:
-        uiAlert(windowWidth, windowHeight, *th, "关于 Mini-C Studio",
-                std::string(MINIC_TITLE) + "  " + MINIC_VERSION + "\n"
-                + MINIC_ORG + "\n\n"
-                + "本模块：图形交互与状态反馈（角色 C）\n"
-                + "文本编辑：B　　文件管理：E\n"
-                + "编译与运行：D　　主控整合：A\n");
+        uiAlert(m_w, m_h, *th, "关于 Mini-C Studio",
+                std::string("Mini-C Studio ") + MINIC_VERSION +
+                "\n\n轻量级 C 语言集成开发环境\n" + MINIC_ORG + "\n\n"
+                "模块分工：\n"
+                "  A  组长 / 架构与集成\n"
+                "  B  自研文本缓冲区\n"
+                "  C  GUI 界面与交互控制\n"
+                "  D  编译调度与运行时托管\n"
+                "  E  文件生命周期管理\n\n"
+                "快捷键：Ctrl+N/O/S  F7 编译  F5 运行  Ctrl+F 查找  Ctrl+T 换主题");
         break;
     default:
         break;
@@ -1568,279 +1819,317 @@ void MainWindow::onCommand(int cmd)
 }
 
 // ============================================================================
-//  文件操作（真正写盘的地方走 CoreApi → E 同学）
+//  文件操作
 // ============================================================================
 bool MainWindow::confirmDiscard()
 {
-    if (!buffer->isDirty()) return true;
-    DlgRet r = uiMessageBox(windowWidth, windowHeight, *th,
-                            "Mini-C Studio",
-                            "当前文件有未保存的修改，要保存吗？",
-                            DLG_YESNOCANCEL);
-    if (r == RET_CANCEL || r == RET_NONE) return false;
-    if (r == RET_NO) return true;
-    return doSave();
+    if (!CoreApi::inst().bufDirty()) return true;
+    DlgRet r = uiMessageBox(m_w, m_h, *th, "未保存的更改",
+                            "当前文档有未保存的修改。\n是否在关闭前保存？", DLG_YESNOCANCEL);
+    if (r == RET_CANCEL) return false;
+    if (r == RET_YES)    return doSave();
+    return true;
 }
 
 bool MainWindow::doSaveTo(const std::string& path)
 {
     if (path.empty()) return false;
-    std::string content = buffer->saveToString();
-    // B 的 saveToString() 输出纯 "\n"（见《B同学答复清单》Q3）。
-    // 按 B 同学的分工说明，写盘方负责把 "\n" 转成 Windows 的 "\r\n"，
-    // 这样生成的 .c 文件在记事本里也能正确换行；读回时 loadFromString 会剥掉 "\r"，内部仍用 "\n"。
-    std::string crlf;
-    crlf.reserve(content.size() + content.size() / 4);
-    for (size_t i = 0; i < content.size(); ++i)
+    if (!CoreApi::inst().fileSave(path))
     {
-        if (content[i] == '\n') crlf += "\r\n";
-        else crlf += content[i];
-    }
-    if (!CoreApi::inst().fileWrite(path, crlf))
-    {
-        uiAlert(windowWidth, windowHeight, *th, "保存失败",
-                "无法写入文件：\n" + path + "\n\n请检查路径是否合法、是否有写入权限。");
+        // 修复 T6.8：保存失败时也立刻把状态栏置红，再弹模态框
         setStatus("保存失败", th->err);
+        uiAlert(m_w, m_h, *th, "保存失败",
+                "无法写入文件：\n" + path + "\n\n请检查：路径是否存在、是否有写权限、磁盘是否已满。");
         return false;
     }
-    buffer->setFilePath(path);
-    buffer->setDirty(false);
-    appendConsole("[已保存] " + path);
-    setStatus("保存成功", th->ok);
-    outputPanelText = "保存成功: " + path;
+    setStatus("已保存：" + path, th->ok);
     return true;
 }
 
 bool MainWindow::doSave()
 {
-    std::string path = buffer->getFilePath();
+    std::string path = CoreApi::inst().bufPath();
     if (path.empty()) return doSaveAs();
     return doSaveTo(path);
 }
 
 bool MainWindow::doSaveAs()
 {
-    std::string path = buffer->getFilePath();
-    if (path.empty()) path = "untitled.c";
-    if (!uiPickPath("另存为", path, true)) return false;
+    std::string path = CoreApi::inst().bufPath();
+    if (!uiPickPath(m_w, m_h, *th, "另存为", path, true)) return false;
+    if (path.empty()) return false;
+    // 没写扩展名则补 .c
+    if (path.find('.') == std::string::npos) path += ".c";
     return doSaveTo(path);
 }
 
 void MainWindow::doOpen()
 {
-    if (!confirmDiscard()) return;
+    std::string path = CoreApi::inst().bufPath();
+    if (!uiPickPath(m_w, m_h, *th, "打开 C 源文件", path, false)) return;
+    if (path.empty()) return;
 
-    std::string path = buffer->getFilePath();
-    if (!uiPickPath("打开 C 源文件", path, false)) return;
-
-    std::string text;
-    if (!CoreApi::inst().fileRead(path, text))
+    if (!CoreApi::inst().fileOpen(path))
     {
-        uiAlert(windowWidth, windowHeight, *th, "打开失败",
-                "无法读取文件：\n" + path + "\n\n请检查文件是否存在、是否有读取权限。");
+        // 修复 T6.8：先把状态栏置红，再弹模态框；弹窗出现的同时状态栏已更新，
+        // 不用等用户点确定才看到"打开失败"。
         setStatus("打开失败", th->err);
+        uiAlert(m_w, m_h, *th, "打开失败",
+                "无法打开文件：\n" + path + "\n\n请检查：文件是否存在、路径是否正确、是否有读权限。");
         return;
     }
-    buffer->loadFromString(text);
-    buffer->setFilePath(path);
-    buffer->setDirty(false);
     m_topLine = 0; m_leftCol = 0;
-    clearSel();
+    clearSelection();
     m_diagnostics.clear();
     m_compileState = CS_NONE;
-    appendConsole("[已打开] " + path);
-    setStatus("打开成功", th->ok);
-    outputPanelText = "已打开: " + path;
+    setStatus("已打开：" + path, th->ok);
+}
+
+void MainWindow::doCloseDoc()
+{
+    if (!confirmDiscard()) return;
+    CoreApi::inst().fileNew();
+    m_topLine = 0; m_leftCol = 0;
+    clearSelection();
+    m_diagnostics.clear();
+    m_compileState = CS_NONE;
+    setStatus("文档已关闭");
 }
 
 void MainWindow::doExit()
 {
     if (!confirmDiscard()) return;
-    closegraph();
-    exit(0);
+    m_running = false;
 }
 
 // ============================================================================
-//  编译 / 运行（走 CoreApi → D 同学）
+//  编译 / 运行
 // ============================================================================
 void MainWindow::doCompile()
 {
-    if (m_progRunning) { setStatus("程序正在运行，请先停止", th->warn); return; }
+    CoreApi& api = CoreApi::inst();
 
-    // 源码为空 → PPT 要求的异常提示
-    if (buffer->saveToString().find_first_not_of(" \t\r\n") == std::string::npos)
+    // 1) 确保磁盘上是最新代码
+    std::string path = api.bufPath();
+    if (path.empty())
     {
-        uiAlert(windowWidth, windowHeight, *th, "无法编译",
-                "当前源码是空的，请先写点代码再编译。");
+        if (!doSaveAs()) return;
+        path = api.bufPath();
+        if (path.empty()) return;
+    }
+    else if (api.bufDirty())
+    {
+        if (!doSave()) return;
+    }
+
+    // 2) 源码为空检查
+    std::string src = api.bufSave();
+    if (src.find_first_not_of(" \t\r\n") == std::string::npos)
+    {
+        uiAlert(m_w, m_h, *th, "无法编译", "源码为空，请先编写 C 代码再编译。");
         m_compileState = CS_INTERNAL;
+        setStatus("源码为空", th->err);
         return;
     }
 
-    // 先自动保存（编译的是磁盘上的文件）
-    if (!doSave()) return;
-
-    isCompiling = true;
-    setStatus("正在编译...", th->accent);
-    outputPanelText = "编译中...";
-
-    CompileResult r = CoreApi::inst().compile(buffer->getFilePath());
-
-    m_compileState = compileStateOf(r);
-    m_diagnostics  = r.diags;
-    m_diagTop      = 0;
-    m_lastExe      = CoreApi::inst().exePathOf(buffer->getFilePath());
-    isCompiling    = false;
-
-    appendConsole(r.rawOutput);
-    m_bottomTab = (m_compileState == CS_OK) ? 1 : 0;
-
-    switch (m_compileState)
+    // 3) 编译器可用性检查
+    if (!api.compilerAvailable())
     {
-    case CS_OK:
-        setStatus("编译成功", th->ok);
-        outputPanelText = "编译成功";
+        m_compileState = CS_NOCOMPILER;
+        uiAlert(m_w, m_h, *th, "未找到编译器",
+                "没有检测到 gcc 编译器。\n\n"
+                "请安装 MinGW-w64 或 TDM-GCC，\n"
+                "并把 gcc.exe 所在目录加入系统 PATH，然后重启本程序。");
+        setStatus("未找到编译器（gcc）", th->err);
+        return;
+    }
+
+    // 4) 编译（占位实现是同步的，会短暂卡一下；D 同学改成异步后可去掉）
+    m_compiling = true;
+    setStatus("正在编译...", th->accent);
+    render();
+
+    CompileResult res = api.compile(path);
+    m_compiling = false;
+
+    m_diagnostics = res.items;
+    m_compileState = res.state;
+    m_lastExe = res.exePath;
+    m_diagTop = 0;
+    m_bottomTab = 0;
+
+    appendConsole("> gcc \"" + path + "\" -o \"" + res.exePath + "\" -Wall -std=c11\n");
+    appendConsole(res.raw);
+
+    switch (res.state)
+    {
+    case CS_OK:      setStatus("编译成功", th->ok);   break;
+    case CS_WARNING: setStatus("编译成功，有 " + itos((int)res.items.size()) + " 条警告", th->warn); break;
+    case CS_ERROR:   setStatus("编译失败，共 " + itos((int)res.items.size()) + " 个错误", th->err); break;
+    case CS_NOCOMPILER: setStatus("未找到编译器", th->err); break;
+    case CS_TIMEOUT:    setStatus("编译超时（>30s）", th->err);
+        uiAlert(m_w, m_h, *th, "编译超时", "编译过程超过 30 秒仍未结束，已终止。请检查代码中是否存在死循环或超大文件。");
         break;
-    case CS_WARNING:
-        setStatus("编译成功，有警告", th->warn);
-        outputPanelText = "编译成功（有警告）";
-        break;
-    case CS_ERROR:
-        setStatus("编译失败", th->err);
-        outputPanelText = "编译失败";
-        break;
-    case CS_NOCOMPILER:
-        setStatus("未找到编译器", th->err);
-        uiAlert(windowWidth, windowHeight, *th, "未找到编译器",
-                "没有检测到 gcc。\n请安装 MinGW-w64 / TDM-GCC，\n"
-                "并把 gcc.exe 所在目录加入系统 PATH 后重启本程序。");
-        break;
-    default:
-        setStatus("编译异常", th->err);
-        break;
+    default:         setStatus("编译未完成", th->err); break;
     }
 }
 
 void MainWindow::doRun()
 {
-    if (m_progRunning) { setStatus("程序正在运行", th->warn); return; }
+    CoreApi& api = CoreApi::inst();
 
-    std::string exe = m_lastExe;
-    if (exe.empty()) exe = CoreApi::inst().exePathOf(buffer->getFilePath());
-
-    if (!CoreApi::inst().fileExists(exe))
+    if (m_compileState != CS_OK && m_compileState != CS_WARNING)
     {
-        uiAlert(windowWidth, windowHeight, *th, "无法运行",
-                "找不到可执行文件：\n" + exe + "\n\n请先按 F9 编译。");
-        setStatus("请先编译", th->warn);
+        doCompile();
+        if (m_compileState != CS_OK && m_compileState != CS_WARNING) return;
+    }
+    if (m_lastExe.empty()) m_lastExe = api.exePathOf(api.bufPath());
+    if (m_lastExe.empty()) return;
+
+    if (GetFileAttributesA(m_lastExe.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        uiAlert(m_w, m_h, *th, "无法运行",
+                "找不到可执行文件：\n" + m_lastExe + "\n请先按 F7 成功编译一次。");
+        setStatus("可执行文件不存在", th->err);
         return;
     }
 
     m_bottomTab = 1;
-    appendConsole("----- 程序开始运行 -----");
-    if (CoreApi::inst().runStart(exe))
-    {
-        m_progRunning = true;
-        setStatus("运行中...", th->accent);
-        outputPanelText = "运行中...";
-    }
-    else
-    {
-        setStatus("启动失败", th->err);
-    }
+    m_focus = FOCUS_CONSOLE;
+    m_console.clear();
+    m_consoleTop = 0;
+    m_inputLine.clear();
+    appendConsole("> \"" + m_lastExe + "\"");
+
+    m_progRunning = true;
+    setStatus("程序正在运行...", th->warn);
+    api.runStart(m_lastExe);
 }
 
 void MainWindow::doStop()
 {
-    if (!m_progRunning) return;
+    if (!m_progRunning) { setStatus("当前没有正在运行的程序"); return; }
     CoreApi::inst().runStop();
     m_progRunning = false;
-    appendConsole("[已终止]");
-    setStatus("已停止", th->warn);
+    appendConsole("\n[已被用户终止]");
+    setStatus("已终止运行", th->warn);
 }
-
-// ============================================================================
-//  A 原有的 5 个按钮回调：保持 A 的语义，内部调用 C 的实现
-// ============================================================================
-void MainWindow::onNewFile()  { onCommand(CMD_FILE_NEW); }
-void MainWindow::onOpenFile() { onCommand(CMD_FILE_OPEN); }
-void MainWindow::onSaveFile() { onCommand(CMD_FILE_SAVE); }
-void MainWindow::onCompile()  { onCommand(CMD_COMPILE); }
-void MainWindow::onRun()      { onCommand(CMD_RUN); }
 
 // ============================================================================
 //  编辑辅助
 // ============================================================================
-void MainWindow::clearSel()
+void MainWindow::clearSelection()
 {
     m_selActive = false;
-    if (buffer) buffer->clearSelection();
-}
-
-bool MainWindow::hasSel() const
-{
-    return m_selActive;
+    m_selR1 = m_selC1 = m_selR2 = m_selC2 = 0;
 }
 
 void MainWindow::normalizeSel()
 {
-    if (cmpPos(m_selR1, m_selC1, m_selR2, m_selC2) > 0)
+    if (m_selR1 > m_selR2 || (m_selR1 == m_selR2 && m_selC1 > m_selC2))
     {
         int tr = m_selR1, tc = m_selC1;
         m_selR1 = m_selR2; m_selC1 = m_selC2;
         m_selR2 = tr;      m_selC2 = tc;
     }
+    int last = CoreApi::inst().bufLineCount() - 1;
+    if (m_selR2 > last) { m_selR2 = last; m_selC2 = (int)CoreApi::inst().bufGetLine(last).size(); }
+    if (m_selR1 < 0) { m_selR1 = 0; m_selC1 = 0; }
+    if (m_selR1 == m_selR2 && m_selC1 == m_selC2) m_selActive = false;
 }
 
-void MainWindow::syncSelToBuffer()
+bool MainWindow::hasSelection() const { return m_selActive; }
+
+std::string MainWindow::selectedText() const
 {
-    bufSyncSelection(buffer, m_selActive, m_selR1, m_selC1, m_selR2, m_selC2);
+    if (!m_selActive) return "";
+    return CoreApi::inst().bufGetRange(m_selR1, m_selC1, m_selR2, m_selC2);
 }
 
-void MainWindow::deleteSel()
+void MainWindow::deleteSelection()
 {
     if (!m_selActive) return;
-    syncSelToBuffer();
-    buffer->deleteSelection();
-    m_selActive = false;
+    CoreApi& api = CoreApi::inst();
+    api.bufSetCursor(m_selR2, m_selC2);
+    api.bufDeleteRange(m_selR1, m_selC1, m_selR2, m_selC2);
+    api.bufSetCursor(m_selR1, m_selC1);
+    clearSelection();
 }
 
-void MainWindow::insertAtCursor(const std::string& s)
+void MainWindow::insertTextAtCursor(const std::string& s)
 {
     if (s.empty()) return;
-    if (m_selActive) deleteSel();
-    bufInsertString(buffer, s);
+    if (m_selActive) deleteSelection();
+    CoreApi::inst().bufInsertString(s);
 }
 
 void MainWindow::screenToDoc(int x, int y, int& row, int& col)
 {
     Rect t = rText();
-    int line = m_topLine + (y - t.y1) / UI_LINE_H;
-    int total = buffer->getLineCount();
-    if (line < 0) line = 0;
-    if (line >= total) line = total - 1;
+    CoreApi& api = CoreApi::inst();
+    int total = api.bufLineCount();
 
-    std::string s = buffer->getLine(line);
-    int disp = (x - t.x1 - 6) / (m_charW > 0 ? m_charW : 8) + m_leftCol;
-    if (disp < 0) disp = 0;
+    int r = m_topLine + (y - t.y1) / UI_LINE_H;
+    r = clampi(r, 0, total - 1);
 
-    row = line;
-    col = indexOfDispCol(s, disp);
+    std::string L = api.bufGetLine(r);
+    int dcol = m_leftCol;
+    if (m_charW > 0)
+        dcol += (int)floor((double)(x - t.x1 - 6) / m_charW + 0.5);
+    if (dcol < 0) dcol = 0;
+
+    col = indexOfDispCol(L, dcol);
+    row = r;
 }
 
 void MainWindow::scrollToCursor()
 {
-    int row = buffer->getCursorY();
-    int page = visibleLines();
+    CoreApi& api = CoreApi::inst();
+    int total = api.bufLineCount();
+    int vis = visibleLines();
+    int r = api.bufRow();
 
-    if (row < m_topLine) m_topLine = row;
-    if (row >= m_topLine + page) m_topLine = row - page + 1;
+    if (r < m_topLine)                m_topLine = r;
+    else if (r > m_topLine + vis - 1) m_topLine = r - vis + 1;
+    m_topLine = clampi(m_topLine, 0, (total > vis ? total - vis : 0));
 
-    std::string s = buffer->getLine(row);
-    int dcol = dispColOfIndex(s, buffer->getCursorX());
-    int cols = rText().w() / (m_charW > 0 ? m_charW : 8);
-    if (dcol < m_leftCol) m_leftCol = dcol;
-    if (dcol >= m_leftCol + cols - 2) m_leftCol = dcol - cols + 4;
+    std::string L = api.bufGetLine(r);
+    int dcol = dispColOfIndex(L, api.bufCol());
+    int page = (m_charW > 0) ? (rText().w() / m_charW) : 80;
+    if (dcol < m_leftCol)                m_leftCol = dcol;
+    else if (dcol > m_leftCol + page - 2) m_leftCol = dcol - page + 2;
     if (m_leftCol < 0) m_leftCol = 0;
+}
+
+void MainWindow::setStatus(const std::string& msg, COLORREF c)
+{
+    m_statusMsg = msg;
+    m_statusColor = c;
+}
+
+void MainWindow::setStatus(const std::string& msg)
+{
+    m_statusMsg = msg;
+    m_statusColor = th->dim;
+}
+
+void MainWindow::appendConsole(const std::string& text)
+{
+    std::string cur;
+    for (size_t i = 0; i < text.size(); i++)
+    {
+        if (text[i] == '\n') { m_console.push_back(cur); cur.clear(); }
+        else if (text[i] != '\r') cur += text[i];
+    }
+    if (!cur.empty()) m_console.push_back(cur);
+
+    if ((int)m_console.size() > 3000)
+        m_console.erase(m_console.begin(), m_console.begin() + 500);
+
+    // 自动滚到底部
+    int page = rConsoleBody().h() / 18;
+    m_consoleTop = ((int)m_console.size() > page) ? (int)m_console.size() - page : 0;
+    if (m_consoleTop < 0) m_consoleTop = 0;
 }
 
 // ============================================================================
@@ -1848,90 +2137,101 @@ void MainWindow::scrollToCursor()
 // ============================================================================
 bool MainWindow::searchNext(bool forward)
 {
-    if (m_findText.empty()) { setStatus("请先输入查找内容", th->warn); return false; }
+    CoreApi& api = CoreApi::inst();
+    if (m_findText.empty()) { setStatus("请输入查找内容"); return false; }
 
-    int r, c, len;
+    int total = api.bufLineCount();
+    if (total <= 0) return false;
 
-    // 反向查找：从头扫一遍，记下光标之前的最后一个匹配
-    if (!forward)
+    int r = api.bufRow();
+    int c = api.bufCol();
+
+    for (int step = 0; step <= total; step++)
     {
-        int curR = buffer->getCursorY(), curC = buffer->getCursorX();
-        int bestR = -1, bestC = -1, bestLen = 0;
-        int fromR = 0, fromC = 0;
-        for (int guard = 0; guard < 20000; guard++)
+        std::string L = api.bufGetLine(r);
+        int pos = forward ? findInLine(L, m_findText, forward ? c : c - 1, m_caseSensitive)
+                          : rfindInLine(L, m_findText, c - 1, m_caseSensitive);
+        if (pos >= 0)
         {
-            int rr, cc, ll;
-            if (!bufFindNext(buffer, m_findText, m_caseSensitive,
-                             fromR, fromC, rr, cc, ll, false)) break;
-            if (cmpPos(rr, cc, curR, curC) >= 0) break;   // 已经到光标之后了
-            bestR = rr; bestC = cc; bestLen = ll;
-            fromR = rr; fromC = cc + 1;
+            api.bufSetCursor(r, pos + (int)m_findText.size());
+            m_selActive = true;
+            m_selR1 = r;  m_selC1 = pos;
+            m_selR2 = r;  m_selC2 = pos + (int)m_findText.size();
+            m_hasMatch = true;
+            m_matchR = r; m_matchC = pos; m_matchLen = (int)m_findText.size();
+            scrollToCursor();
+            setStatus("已找到匹配：行 " + itos(r + 1) + " 列 " + itos(pos + 1), th->ok);
+            return true;
         }
-        if (bestR < 0)
+        if (forward)
         {
-            m_hasMatch = false;
-            clearSel();
-            setStatus("找不到 \"" + m_findText + "\"", th->warn);
-            return false;
+            r++; if (r >= total) r = 0;
+            c = 0;
         }
-        r = bestR; c = bestC; len = bestLen;
-    }
-    else
-    {
-        int fromR = buffer->getCursorY();
-        int fromC = buffer->getCursorX() + 1;
-        if (!bufFindNext(buffer, m_findText, m_caseSensitive,
-                         fromR, fromC, r, c, len, true))
+        else
         {
-            m_hasMatch = false;
-            clearSel();
-            setStatus("找不到 \"" + m_findText + "\"", th->warn);
-            return false;
+            r--; if (r < 0) r = total - 1;
+            c = (int)api.bufGetLine(r).size();
         }
     }
 
-    m_hasMatch = true; m_matchR = r; m_matchC = c; m_matchLen = len;
-    bufSetCursor(buffer, r, c);
-    m_selR1 = r; m_selC1 = c;
-    m_selR2 = r; m_selC2 = c + len;
-    m_selActive = true;
-    syncSelToBuffer();
-    scrollToCursor();
-    setStatus("找到匹配（第 " + itos(r + 1) + " 行）", th->ok);
-    return true;
+    m_hasMatch = false;
+    clearSelection();
+    setStatus("未找到匹配项：" + m_findText, th->warn);
+    return false;
 }
 
 void MainWindow::replaceOne()
 {
-    if (m_findText.empty()) return;
-    if (!m_hasMatch) { if (!searchNext(true)) return; }
+    if (m_findText.empty()) { setStatus("请输入查找内容"); return; }
+    CoreApi& api = CoreApi::inst();
 
-    syncSelToBuffer();
-    buffer->deleteSelection();
-    bufInsertString(buffer, m_replaceText);
-    m_selActive = false;
-    m_hasMatch = false;
-    setStatus("已替换 1 处", th->ok);
+    // 若当前选区正好是匹配项，直接替换
+    if (m_hasMatch && m_selActive && selectedText() == m_findText)
+    {
+        api.bufSetCursor(m_selR2, m_selC2);
+        api.bufDeleteRange(m_selR1, m_selC1, m_selR2, m_selC2);
+        api.bufSetCursor(m_selR1, m_selC1);
+        api.bufInsertString(m_replaceText);
+        clearSelection();
+        setStatus("已替换 1 处", th->ok);
+    }
     searchNext(true);
 }
 
 void MainWindow::replaceAll()
 {
-    if (m_findText.empty()) { setStatus("请先输入查找内容", th->warn); return; }
+    if (m_findText.empty()) { setStatus("请输入查找内容"); return; }
+    CoreApi& api = CoreApi::inst();
 
-    int n = bufReplaceAll(buffer, m_findText, m_replaceText, m_caseSensitive);
-    clearSel();
-    scrollToCursor();
-    if (n > 0) setStatus("共替换 " + itos(n) + " 处", th->ok);
-    else       setStatus("没有找到可替换的内容", th->warn);
+    int count = 0;
+    api.bufSetCursor(0, 0);
+    int total = api.bufLineCount();
+    for (int r = 0; r < total; r++)
+    {
+        std::string L = api.bufGetLine(r);
+        int from = 0, pos;
+        while ((pos = findInLine(L, m_findText, from, m_caseSensitive)) >= 0)
+        {
+            api.bufDeleteRange(r, pos, r, pos + (int)m_findText.size());
+            api.bufSetCursor(r, pos);
+            api.bufInsertString(m_replaceText);
+            L = api.bufGetLine(r);
+            from = pos + (int)m_replaceText.size();
+            count++;
+            if (from > (int)L.size()) break;
+        }
+    }
+    clearSelection();
+    setStatus("共替换 " + itos(count) + " 处", th->ok);
+    appendConsole("[替换] 共替换 " + itos(count) + " 处。");
 }
 
 // ============================================================================
-//  剪贴板（Win32，UTF-8/GBK 都用 CF_TEXT，够用）
+//  剪贴板
 // ============================================================================
 void MainWindow::setClipboardText(const std::string& s)
 {
-    if (s.empty()) return;
     if (!OpenClipboard(NULL)) return;
     EmptyClipboard();
     HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, s.size() + 1);
@@ -1952,7 +2252,7 @@ std::string MainWindow::getClipboardText()
     HANDLE h = GetClipboardData(CF_TEXT);
     if (h)
     {
-        const char* p = (const char*)GlobalLock(h);
+        char* p = (char*)GlobalLock(h);
         if (p) out = p;
         GlobalUnlock(h);
     }

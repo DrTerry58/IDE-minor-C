@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // 文件名：EditorExt.cpp
 // 负责人：C（GUI 界面 + 交互控制）
 // 说明：查找 / 替换 / 按单词移动 的实现。
@@ -90,8 +90,41 @@ std::string bufRangeText(EditorBuffer* b, int r1, int c1, int r2, int c2)
 }
 
 // ---------------------------------------------------------------------------
-//  大小写不敏感比较（只处理 ASCII 字母，中文不受影响）
+//  以下 4 个函数桥接 CoreApi 契约里 EditorBuffer 缺的方法
 // ---------------------------------------------------------------------------
+void bufInsertAt(EditorBuffer* b, int row, int col, const std::string& s)
+{
+    if (!b || s.empty()) return;
+    // bufSetCursor 内部已做 (列,行) 映射与越界夹紧
+    bufSetCursor(b, row, col);
+    b->pasteText(s);
+}
+
+void bufDeleteRange(EditorBuffer* b, int r1, int c1, int r2, int c2)
+{
+    if (!b) return;
+    // B 的 setSelection 为 (startX=列, startY=行, endX=列, endY=行)；
+    // 入参 (r1=行, c1=列, r2=行, c2=列)，故映射为 (c1,r1,c2,r2)，
+    // B 会规范化起点 <= 终点，删除范围不受传入顺序影响。
+    b->setSelection(c1, r1, c2, r2);
+    b->deleteSelection();
+}
+
+void bufClear(EditorBuffer* b)
+{
+    if (!b) return;
+    b->clearSelection();
+    b->loadFromString("");   // 重置为 1 行空行、光标 (0,0)、清空选中与撤销栈、脏标记置 false
+}
+
+void bufGotoLine(EditorBuffer* b, int row)
+{
+    if (!b) return;
+    if (row < 0) row = 0;
+    if (row >= b->getLineCount()) row = b->getLineCount() - 1;
+    bufSetCursor(b, row, 0); // 跳到该行行首
+}
+
 static bool eqCharCI(char a, char b, bool matchCase)
 {
     if (matchCase) return a == b;

@@ -1,10 +1,7 @@
 ﻿// ============================================================================
 // 文件名：CoreTypes.h
 // 职责：GUI 层 与 编译/运行模块（D 同学）之间的【公共数据结构】
-// 说明：这个文件原本定义 Diagnostic / CompileResult / RunResult，
-//       现在 D 同学已经交付 Compiler.h/.cpp，里面已经定义了同名的权威类型，
-//       全工程（A、C 都一样）统一用 D 的那一份，这里【不再重复定义】，
-//       只保留 C 自己 UI 内部用的状态枚举（CompileState / RunState / DiagLevel）。
+// 说明：这个文件是 C 与 D 的"契约"，双方都不能单方面改。
 // ============================================================================
 
 #pragma once
@@ -14,12 +11,7 @@
 #include <string>
 #include <vector>
 
-// ★ D 同学交付的权威类型定义（Diagnostic / CompileResult / RunResult）。
-//   D 的 Diagnostic.level 是 int：0=提示 / 1=警告 / 2=错误，
-//   与下面 DiagLevel 的取值一一对应，可以直接比较、直接赋值。
-#include "Compiler.h"
-
-// ---------------- 诊断级别（取值与 D 的 Diagnostic.level 一致） ----------------
+// ---------------- 诊断级别 ----------------
 enum DiagLevel
 {
     DIAG_INFO    = 0,   // 提示 / note
@@ -27,7 +19,19 @@ enum DiagLevel
     DIAG_ERROR   = 2    // 错误
 };
 
-// ---------------- 编译结果状态（C 的 UI 内部状态机，与 D 的 CompileResult 分开） ----------------
+// ---------------- 单条诊断信息 ----------------
+struct Diagnostic
+{
+    int         line;      // 行号，0-based（状态栏/面板显示时 +1）
+    int         column;    // 列号，0-based
+    DiagLevel   level;     // 级别
+    std::string message;   // 描述文本
+    std::string tag;       // 原始标签字符串，如 "error" / "warning" / "note"
+
+    Diagnostic() : line(0), column(0), level(DIAG_ERROR) {}
+};
+
+// ---------------- 编译结果状态 ----------------
 enum CompileState
 {
     CS_NONE       = 0,   // 尚未编译
@@ -39,7 +43,18 @@ enum CompileState
     CS_INTERNAL   = 6    // IDE 内部错误（如源文件为空 / 路径非法）
 };
 
-// ---------------- 运行状态（C 的 UI 内部状态机） ----------------
+// ---------------- 编译结果 ----------------
+struct CompileResult
+{
+    CompileState          state;     // 状态
+    std::string           raw;       // 编译器原始输出（整段文本，控制台用）
+    std::vector<Diagnostic> items;   // 结构化诊断列表（诊断面板用）
+    std::string           exePath;   // 生成的可执行文件路径
+
+    CompileResult() : state(CS_NONE) {}
+};
+
+// ---------------- 运行状态 ----------------
 enum RunState
 {
     RS_IDLE    = 0,   // 空闲

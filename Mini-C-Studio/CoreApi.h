@@ -1,15 +1,12 @@
-// ============================================================================
+﻿// ============================================================================
 // 文件名：CoreApi.h
-// 负责人：C（GUI 界面 + 交互控制）
+// 职责：GUI 层（C 同学）访问所有核心功能的【唯一入口 / 门面】
 //
-// 职责：GUI 层访问【E 同学文件模块 / D 同学编译与运行模块】的唯一入口（门面）。
-//
-// 注意：B 同学（文本缓冲区）不走这里 —— MainWindow 直接用 A 代码里的
-//       buffer 成员（EditorBuffer*），见 MainWindow.cpp。
-//       B 相关的适配在 EditorExt.h。
-//
-// 队友交付后怎么接：打开 CoreApi.cpp，把顶部三个宏从 0 改成 1，
-//                   并把队友的头文件 include 进去。GUI 层一行都不用改。
+// 为什么要这一层？
+//   src/core 完全不依赖 GUI，src/gui 只依赖 CoreApi。
+//   队友模块没写完时，CoreApi 走"占位实现"（MiniStub.h）；
+//   队友写完后，在 CoreApi.cpp 里把宏改成 1 即可无缝切换，
+//   MainWindow.cpp 一行都不用动。
 // ============================================================================
 
 #pragma once
@@ -26,11 +23,38 @@ class CoreApi
 public:
     static CoreApi& inst();
 
+    // ================= B 同学：文本缓冲区 =================
+    int         bufLineCount();
+    std::string bufGetLine(int row);
+    void        bufInsertChar(char c);
+    void        bufInsertString(const std::string& s);
+    void        bufInsertAt(int row, int col, const std::string& s);
+    void        bufDeleteBack();                       // Backspace
+    void        bufDeleteForward();                    // Delete
+    void        bufDeleteRange(int r1, int c1, int r2, int c2);
+    std::string bufGetRange(int r1, int c1, int r2, int c2);
+    void        bufEnter();
+    void        bufMoveCursor(int dx, int dy);
+    void        bufSetCursor(int row, int col);
+    void        bufGotoLine(int row);
+    int         bufRow();
+    int         bufCol();
+    void        bufLoad(const std::string& text);
+    std::string bufSave();
+    void        bufClear();
+    bool        bufDirty();
+    void        bufSetDirty(bool d);
+    std::string bufPath();
+    void        bufSetPath(const std::string& p);
+    void        bufUndo();
+    void        bufRedo();
+    bool        bufCanUndo();
+    bool        bufCanRedo();
+
     // ================= E 同学：文件生命周期 =================
-    // 只负责读写磁盘，不碰缓冲区。失败返回 false，由 C 负责弹窗。
-    bool fileRead(const std::string& path, std::string& outText);
-    bool fileWrite(const std::string& path, const std::string& text);
-    bool fileExists(const std::string& path);
+    bool fileNew();
+    bool fileOpen(const std::string& path);            // 读盘 -> 重建缓冲区
+    bool fileSave(const std::string& path);            // 缓冲区 -> 写盘
 
     // ================= D 同学：编译 =================
     bool          compilerAvailable();
@@ -39,7 +63,7 @@ public:
 
     // ================= D 同学：运行 =================
     bool runStart(const std::string& exePath);
-    bool runPoll(std::string& out, int& exitCode, bool& finished);
+    bool runPoll(std::string& out, int& exitCode, bool& finished);  // 非阻塞轮询
     void runSendInput(const std::string& line);
     void runStop();
     bool runIsRunning();

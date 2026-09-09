@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // 文件名：EditorExt.h / EditorExt.cpp
 // 负责人：C（GUI 界面 + 交互控制）
 //
@@ -166,6 +166,20 @@ inline void bufDeleteSelection(EditorBuffer* b)
 // 取任意区间文本（等价于 B 文档里的 getRangeText）
 // C 用 B 的只读接口 getLine 组合实现，不碰缓冲区内部。
 std::string bufRangeText(EditorBuffer* b, int r1, int c1, int r2, int c2);
+
+// 在 (row, col) 处插入文本（等价于 B 文档里的 insertAt）。
+// 先把光标移到目标位置，再走 pasteText（B 的 pasteText 在光标处插入并移动光标）。
+void bufInsertAt(EditorBuffer* b, int row, int col, const std::string& s);
+
+// 删除任意矩形区间 (r1,c1)..(r2,c2)（等价于 B 文档里的 deleteRange）。
+// 用 B 的 setSelection + deleteSelection 组合；B 会规范化“起点 <= 终点”。
+void bufDeleteRange(EditorBuffer* b, int r1, int c1, int r2, int c2);
+
+// 清空缓冲区（等价于 B 文档里的 clear）。
+void bufClear(EditorBuffer* b);
+
+// 跳到某一行行首（等价于 B 文档里的 gotoLine）。
+void bufGotoLine(EditorBuffer* b, int row);
 
 // ============================================================================
 //  四、查找 / 替换：B 尚未提供，C 用 B 的只读接口组合实现

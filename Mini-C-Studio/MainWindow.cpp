@@ -8,6 +8,7 @@
 #include <cstdio>   // 用于 sprintf
 #include <string>
 #include <windows.h>
+#include "Compiler.h"
 
 // ---------- 构造函数：初始化默认值 ----------
 MainWindow::MainWindow()
@@ -303,14 +304,16 @@ void MainWindow::onSaveFile()
     }
 }
 
-void MainWindow::onCompile()
-{
-    // 先自动保存，确保磁盘上有最新代码
+void MainWindow::onCompile() {
     onSaveFile();
-    outputPanelText = "编译中... (等待D同学实现编译调度)";
+    std::string src = buffer->getFilePath();
+    if (src.empty()) src = "test.c";
+    CompileResult result = compile(src, "test.exe");
+    // 把 result 显示到 outputPanelText
+    outputPanelText = result.rawOutput;
 }
 
-void MainWindow::onRun()
-{
-    outputPanelText = "运行中... (等待D同学实现运行时托管)";
+void MainWindow::onRun() {
+    RunResult result = runSync("test.exe", "", 3000);
+    outputPanelText = result.stdoutText + "\n" + result.stderrText;
 }

@@ -55,6 +55,7 @@ public:
     bool fileNew();
     bool fileOpen(const std::string& path);            // 读盘 -> 重建缓冲区
     bool fileSave(const std::string& path);            // 缓冲区 -> 写盘
+    const char* lastError() const;                     // 最近一次文件操作失败原因（中文，可直接弹窗）
 
     // ================= D 同学：编译 =================
     bool          compilerAvailable();
@@ -72,6 +73,8 @@ private:
     CoreApi() {}
     CoreApi(const CoreApi&);
     CoreApi& operator=(const CoreApi&);
+
+    std::string m_lastError;   // 最近一次文件操作的错误原因（失败时写入，成功时清空）
 };
 
 #endif // MINIC_COREAPI_H

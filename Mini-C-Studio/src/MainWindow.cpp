@@ -1838,8 +1838,13 @@ bool MainWindow::doSaveTo(const std::string& path)
     {
         // 修复 T6.8：保存失败时也立刻把状态栏置红，再弹模态框
         setStatus("保存失败", th->err);
+        // E 的真实 FileManager 会给出具体原因（如"权限不足或文件被其他程序占用"）
+        const char* why = CoreApi::inst().lastError();
+        std::string detail = (why && *why)
+            ? (std::string("原因：") + why)
+            : std::string("请检查：路径是否存在、是否有写权限、磁盘是否已满。");
         uiAlert(m_w, m_h, *th, "保存失败",
-                "无法写入文件：\n" + path + "\n\n请检查：路径是否存在、是否有写权限、磁盘是否已满。");
+                "无法写入文件：\n" + path + "\n\n" + detail);
         return false;
     }
     setStatus("已保存：" + path, th->ok);
@@ -1874,8 +1879,12 @@ void MainWindow::doOpen()
         // 修复 T6.8：先把状态栏置红，再弹模态框；弹窗出现的同时状态栏已更新，
         // 不用等用户点确定才看到"打开失败"。
         setStatus("打开失败", th->err);
+        const char* why = CoreApi::inst().lastError();
+        std::string detail = (why && *why)
+            ? (std::string("原因：") + why)
+            : std::string("请检查：文件是否存在、路径是否正确、是否有读权限。");
         uiAlert(m_w, m_h, *th, "打开失败",
-                "无法打开文件：\n" + path + "\n\n请检查：文件是否存在、路径是否正确、是否有读权限。");
+                "无法打开文件：\n" + path + "\n\n" + detail);
         return;
     }
     m_topLine = 0; m_leftCol = 0;

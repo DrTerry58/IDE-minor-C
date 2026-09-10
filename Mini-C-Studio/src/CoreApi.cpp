@@ -17,7 +17,7 @@
 
 // ============================ 对接开关 ============================
 #define USE_B_REAL_BUFFER    1    // B 同学：自研文本缓冲区 EditorBuffer（已接入并编译验证通过）
-#define USE_E_REAL_FILEMGR   0    // E 同学：文件管理 FileManager
+#define USE_E_REAL_FILEMGR   1    // E 同学：文件管理 FileManager（已交付并接入）
 #define USE_D_REAL_COMPILER  0    // D 同学：编译调度 Compiler
 #define USE_D_REAL_RUNTIME   0    // D 同学：运行时托管 Runtime
 
@@ -123,9 +123,65 @@ void CoreApi::bufSetCursor(int row, int col)         { g_buffer.setCursor(row, c
 // ============================================================================
 //  E：文件生命周期
 // ============================================================================
+#if USE_E_REAL_FILEMGR
+// E 的真实 FileManager 按契约 3.2 交付：只管磁盘读写、不碰缓冲区，
+// 因此"磁盘 <-> 缓冲区"的转换由 C 在此桥接（契约第 4 节：适配由 C 侧完成）。
+//
+// ⚠ 换行约定：saveToString() 的输出必须【原样】交给 E 的 saveFile，
+//   E 写盘时自己把 \n 转成 \r\n、读盘时自己把 \r 去掉。
+//   C 侧若预先转换，会出现 \r\r\n 双重转换错误。
+
+bool CoreApi::fileNew()
+{
+    m_lastError.clear();
+    g_fileMgr.newFile();               // 磁盘上无操作，恒为 FILE_OK
+    g_buffer.loadFromString("");       // 清空编辑区（B 的缓冲区负责）
+    g_buffer.setFilePath("");
+    g_buffer.setDirty(false);
+    return true;
+}
+
+bool CoreApi::fileOpen(const std::string& path)
+{
+    m_lastError.clear();
+    std::string text;
+    FileErr e = g_fileMgr.openFile(path, text);
+    if (e != FILE_OK)
+    {
+        m_lastError = FileManager::fileErrMsg(e);
+        return false;                  // 失败时缓冲区保持原样，不覆盖用户内容
+    }
+    g_buffer.loadFromString(text);
+    g_buffer.setFilePath(path);
+    g_buffer.setDirty(false);
+    return true;
+}
+
+bool CoreApi::fileSave(const std::string& path)
+{
+    m_lastError.clear();
+    FileErr e = g_fileMgr.saveFile(path, g_buffer.saveToString());
+    if (e != FILE_OK)
+    {
+        m_lastError = FileManager::fileErrMsg(e);
+        return false;
+    }
+    g_buffer.setDirty(false);
+    g_buffer.setFilePath(path);
+    return true;
+}
+
+const char* CoreApi::lastError() const
+{
+    return m_lastError.empty() ? "" : m_lastError.c_str();
+}
+
+#else
 bool CoreApi::fileNew()                              { return g_fileMgr.newFile(g_buffer); }
 bool CoreApi::fileOpen(const std::string& path)      { return g_fileMgr.openFile(path, g_buffer); }
 bool CoreApi::fileSave(const std::string& path)      { return g_fileMgr.saveFile(path, g_buffer); }
+const char* CoreApi::lastError() const               { return ""; }
+#endif
 
 // ============================================================================
 //  D：编译

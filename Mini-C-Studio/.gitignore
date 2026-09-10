@@ -1,0 +1,13 @@
+x64/
+Debug/
+Release/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.log
+temp.c
+temp.exe
+error.txt
+output.txt
+.vs/

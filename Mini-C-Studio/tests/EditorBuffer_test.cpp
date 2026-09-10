@@ -9,7 +9,8 @@
 //  全部通过输出：=== ALL TESTS PASSED ===
 // ============================================================================
 
-#include "EditorBuffer.h"
+// 2026-09-10 目录整改：本文件位于 tests/，源码在 ../src/
+#include "../src/EditorBuffer.h"
 
 #include <iostream>
 #include <string>

@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 文件名: Compiler.cpp
 // 职责: 编译调度模块实现
 // 负责人: D 同学
@@ -35,46 +35,57 @@ static std::string readFileToString(const std::string& path) {
     return ss.str();
 }
 
-// ---------- 工具函数：解析 gcc 输出行（对齐 CoreTypes.h 字段） ----------
-static Diagnostic parseGccLine(const std::string& line) {
-    Diagnostic diag;   // 默认构造：line=0, column=0, level=DIAG_ERROR
-
+// ============================================================
+//  解析 gcc 输出行
+//  返回值：true = 有效诊断行；false = 上下文行/回显行/指示行（应丢弃）
+//
+//  gcc 一次报错的典型输出：
+//      bad.c: In function 'main':                      ← 无效（parsed < 5）
+//      bad.c:1:21: error: expected ';' before '}'      ← 有效
+//          1 | int main() { return 0 }                 ← 无效
+//            |                     ^~                  ← 无效
+//            |                     ;                   ← 无效
+// ============================================================
+static bool parseGccLine(const std::string& line, Diagnostic& diag) {
     int lineNum = 0, colNum = 0;
-    char filePart[256] = "";
-    char levelPart[64] = "";
-    char msgPart[512] = "";
+    char filePart[256]  = "";
+    char levelPart[64]  = "";
+    char msgPart[512]   = "";
 
-    // gcc 格式：test.c:5:10: error: 'x' undeclared
+    // 要求 5 段全部匹配：文件名:行号:列号: 级别: 消息
     int parsed = sscanf(line.c_str(), "%255[^:]:%d:%d: %63[^:]: %511[^\n]",
                         filePart, &lineNum, &colNum, levelPart, msgPart);
 
-    if (parsed >= 3) {
-        // ★ 行号减 1，变成 0-based
-        diag.line = (lineNum > 0) ? (lineNum - 1) : 0;
-        diag.column = (colNum > 0) ? (colNum - 1) : 0;
+    // ★ 关键：parsed < 5 说明格式不符（上下文行 / 回显行 / 指示行），丢弃
+    if (parsed < 5) return false;
 
-        std::string lv = levelPart;
-        if (lv.find("error") != std::string::npos ||
-            lv.find("Error") != std::string::npos) {
-            diag.level = DIAG_ERROR;
-            diag.tag = "error";
-        } else if (lv.find("warning") != std::string::npos ||
-                   lv.find("Warning") != std::string::npos) {
-            diag.level = DIAG_WARNING;
-            diag.tag = "warning";
-        } else {
-            diag.level = DIAG_INFO;
-            diag.tag = "note";
-        }
-        diag.message = msgPart;
-    } else {
-        // 解析失败，整行作为错误信息
-        diag.message = line;
+    // levelPart 必须是 error / warning / note 之一
+    std::string lv = levelPart;
+    bool isError   = (lv.find("error")   != std::string::npos ||
+                      lv.find("Error")   != std::string::npos);
+    bool isWarning = (lv.find("warning") != std::string::npos ||
+                      lv.find("Warning") != std::string::npos);
+    bool isNote    = (lv.find("note")    != std::string::npos ||
+                      lv.find("Note")    != std::string::npos);
+
+    if (!isError && !isWarning && !isNote) return false;
+
+    // 填充诊断字段（行号/列号减 1，变成 0-based）
+    diag.line   = (lineNum > 0) ? (lineNum - 1) : 0;
+    diag.column = (colNum > 0)  ? (colNum - 1)  : 0;
+
+    if (isError) {
         diag.level = DIAG_ERROR;
-        diag.tag = "error";
+        diag.tag   = "error";
+    } else if (isWarning) {
+        diag.level = DIAG_WARNING;
+        diag.tag   = "warning";
+    } else {
+        diag.level = DIAG_INFO;
+        diag.tag   = "note";
     }
-
-    return diag;
+    diag.message = msgPart;
+    return true;
 }
 
 // ============================================================
@@ -125,10 +136,10 @@ CompileResult Compiler::compile(const std::string& srcPath) {
     // 1. 检查源文件是否存在
     if (!fileExists(srcPath)) {
         Diagnostic diag;
-        diag.line = 0;
+        diag.line   = 0;
         diag.column = 0;
-        diag.level = DIAG_ERROR;
-        diag.tag = "error";
+        diag.level  = DIAG_ERROR;
+        diag.tag    = "error";
         diag.message = "源文件不存在: " + srcPath;
         result.items.push_back(diag);
         result.state = CS_ERROR;
@@ -153,7 +164,7 @@ CompileResult Compiler::compile(const std::string& srcPath) {
     deleteFileIfExists(errorFile);
     result.raw = rawErr;
 
-    // 6. 逐行解析（无论有没有错误都解析）
+    // 6. 逐行解析（只保留有效诊断行，过滤上下文行/回显行/指示行）
     int errorCount = 0;
     int warningCount = 0;
 
@@ -162,14 +173,14 @@ CompileResult Compiler::compile(const std::string& srcPath) {
         std::string line;
         while (std::getline(stream, line)) {
             if (line.empty()) continue;
-            Diagnostic diag = parseGccLine(line);
-            if (diag.message.empty()) {
-                diag.message = line;
-                diag.level = DIAG_ERROR;
-                diag.tag = "error";
-            }
-            if (diag.level == DIAG_ERROR)   errorCount++;
-            if (diag.level == DIAG_WARNING) warningCount++;
+
+            Diagnostic diag;
+            // ★ 无效行直接跳过
+            if (!parseGccLine(line, diag)) continue;
+
+            if (diag.level == DIAG_ERROR)        errorCount++;
+            else if (diag.level == DIAG_WARNING) warningCount++;
+
             result.items.push_back(diag);
         }
     }
@@ -189,10 +200,10 @@ CompileResult Compiler::compile(const std::string& srcPath) {
     else if (!exeExists && rawErr.empty()) {
         // 没有错误输出、exe 也没生成 → gcc 找不到
         Diagnostic diag;
-        diag.line = 0;
+        diag.line   = 0;
         diag.column = 0;
-        diag.level = DIAG_ERROR;
-        diag.tag = "error";
+        diag.level  = DIAG_ERROR;
+        diag.tag    = "error";
         diag.message = "找不到 gcc 编译器，请确认 MinGW 已安装并配置环境变量。";
         result.items.push_back(diag);
         result.state = CS_NOCOMPILER;

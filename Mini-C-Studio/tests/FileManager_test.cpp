@@ -1,11 +1,12 @@
-// FileManager_test.cpp
+ï»¿// FileManager_test.cpp
 // FileManager µÄµ¥Ôª²âÊÔ£¬¿ØÖÆÌ¨³ÌĞò£¬È«¹ı·µ»Ø 0¡£
 // ±àÒë£¨TDM-GCC£¬Dev-C++ ×Ô´øµÄ£©£º
 //   g++ -std=c++11 -Wall -Wextra -finput-charset=GBK -fexec-charset=GBK
 //       FileManager.cpp FileManager_test.cpp -o FileManager_test.exe
 // GBK ±£´æ¡£
 
-#include "FileManager.h"
+// 2026-09-10 Ä¿Â¼Õû¸Ä£º±¾ÎÄ¼şÎ»ÓÚ tests/£¬Ô´ÂëÔÚ ../src/
+#include "../src/FileManager.h"
 
 #include <cstdio>
 #include <cstring>

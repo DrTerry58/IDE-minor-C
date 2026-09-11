@@ -18,8 +18,8 @@
 // ============================ 对接开关 ============================
 #define USE_B_REAL_BUFFER    1    // B 同学：自研文本缓冲区 EditorBuffer（已接入并编译验证通过）
 #define USE_E_REAL_FILEMGR   1    // E 同学：文件管理 FileManager（已交付并接入）
-#define USE_D_REAL_COMPILER  0    // D 同学：编译调度 Compiler
-#define USE_D_REAL_RUNTIME   0    // D 同学：运行时托管 Runtime
+#define USE_D_REAL_COMPILER  1    // D 同学：编译调度 Compiler（2026-09-11 已按契约改造为类成员函数，已接入）
+#define USE_D_REAL_RUNTIME   1    // D 同学：运行时托管 Runtime（2026-09-11 新交付，异步轮询，已接入）
 
 // ---------- 队友真实实现的头文件（改宏为 1 后取消注释） ----------
 #if USE_B_REAL_BUFFER
@@ -186,7 +186,14 @@ const char* CoreApi::lastError() const               { return ""; }
 // ============================================================================
 //  D：编译
 // ============================================================================
-bool          CoreApi::compilerAvailable()                { return g_compiler.available(); }
+// 测试钩子：设了环境变量 MINIC_FORCE_NO_COMPILER 就强制返回"未找到编译器"，
+// 便于本机装有 gcc 时仍能测到异常分支（详见测试流程文档 附录 A）。
+// 放在门面层，D 的 Compiler 代码不受影响。
+bool          CoreApi::compilerAvailable()
+{
+    if (std::getenv("MINIC_FORCE_NO_COMPILER")) return false;
+    return g_compiler.available();
+}
 CompileResult CoreApi::compile(const std::string& srcPath) { return g_compiler.compile(srcPath); }
 std::string   CoreApi::exePathOf(const std::string& src)  { return g_compiler.exePathOf(src); }
 

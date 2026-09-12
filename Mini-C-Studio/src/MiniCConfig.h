@@ -34,6 +34,13 @@
 #define UI_SCROLL_W         14       // 滚动条厚度
 #define UI_LINE_H           20       // 编辑器行高
 #define UI_FONT_H           16       // 编辑器字号
+// ---- 界面字号统一放大（组长反馈字偏小，2026-09-12 新增）----
+// 改 UI_FONT_SCALE 即可全局缩放所有界面文字；各 settextstyle 已用 uiFont() 包一层
+#ifndef UI_FONT_SCALE
+#define UI_FONT_SCALE 1.4f
+#endif
+inline int uiFont(int baseSize) { return (int)(baseSize * UI_FONT_SCALE + 0.5f); }
+
 #define UI_TAB_H            26       // 底部面板标签页高度
 #define UI_FINDBAR_H        36       // 查找/替换条高度
 #define UI_CONSOLE_INPUT_H  24       // 控制台输入行高度

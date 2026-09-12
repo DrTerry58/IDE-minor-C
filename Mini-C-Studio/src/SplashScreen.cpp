@@ -79,7 +79,7 @@ void drawMiniCLogo(int cx, int cy, int size, double progress)
     setbkmode(TRANSPARENT);
     settextcolor(WHITE);
     int fs = (int)(size * 0.56);
-    settextstyle(fs, 0, _T("Consolas"));
+    settextstyle(uiFont(fs), 0, _T("Consolas"));
     int tw = textwidth(_T("C"));
     int th = textheight(_T("C"));
     int tx = cx - tw / 2;
@@ -145,13 +145,13 @@ void showSplashScreen(int totalMs)
 
         // ---------- 主标题 ----------
         settextcolor(WHITE);
-        settextstyle(30, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(30), 0, _T("Microsoft YaHei"));
         int tw = textwidth(_T("Mini-C Studio"));
         outtextxy((SPLASH_W - tw) / 2, 190, _T("Mini-C Studio"));
 
         // ---------- 副标题 ----------
         settextcolor(RGB(176, 192, 226));
-        settextstyle(15, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(15), 0, _T("Microsoft YaHei"));
         std::string sub = std::string("轻量级 C 语言集成开发环境   ") + MINIC_VERSION;
         int sw = strWidth(sub);
         drawStr((SPLASH_W - sw) / 2, 232, sub);
@@ -166,7 +166,7 @@ void showSplashScreen(int totalMs)
 
         // ---------- 底部信息 ----------
         settextcolor(RGB(140, 158, 194));
-        settextstyle(13, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
         std::string org = MINIC_ORG;
         int ow = strWidth(org);
         drawStr((SPLASH_W - ow) / 2, 292, org);

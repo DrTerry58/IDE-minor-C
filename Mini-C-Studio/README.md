@@ -164,3 +164,12 @@
 3. **`MiniStub.h` 的占位实现已全部退役** —— B、D、E 都已接真实实现（4 个宏全为 `1`）。占位类保留在文件里仅作回退与契约对照，运行时不会被调用。
 4. **换行约定** —— C 侧**不做** `\n` → `\r\n` 转换，E 的 `FileManager` 内部已转；两边都转会变成 `\r\r\n`。
 5. **编码约定** —— `src/`、`tests/` 下所有 `.h / .cpp` 统一 **UTF-8 带 BOM**（2026-09-11 已全量处理）；`.vcxproj` 保持 MBCS、**不加** `/utf-8`。
+
+## 界面字号放大（2026-09-12 新增 · 组长反馈字偏小）
+
+本版把界面所有文字（按钮「新建/打开」等、状态栏「就绪/未编译」等提示、启动 LOGO 标题、对话框）统一放大。实现方式：
+
+- 在 `src/MiniCConfig.h` 定义 `#define UI_FONT_SCALE 1.4f` 与 `inline int uiFont(int)`；
+- `src/MainWindow.cpp`、`src/SplashScreen.cpp`、`src/UiDialog.cpp` 中所有 `settextstyle(N, ...)` 已被包成 `settextstyle(uiFont(N), ...)`。
+
+**调字号只改一个常数**：把 `MiniCConfig.h` 里的 `UI_FONT_SCALE` 调大/调小即可全局缩放（如 `1.5f`、`1.6f`）；编辑器字号由 `#define UI_FONT_H` 单独控制。相对 9-11 版本，本版仅有这 4 个文件（`MiniCConfig.h`、`MainWindow.cpp`、`SplashScreen.cpp`、`UiDialog.cpp`）发生变化，其余源文件与仓库一致。

@@ -402,7 +402,7 @@ bool MainWindow::initWindow(int w, int h)
     SetWindowText(GetHWnd(), _T("Mini-C Studio - C 语言集成开发环境"));
 
     // 计算等宽字符宽度
-    settextstyle(UI_FONT_H, 0, _T("Consolas"));
+    settextstyle(uiFont(UI_FONT_H), 0, _T("Consolas"));
     m_charW = textwidth(_T("M"));
     if (m_charW <= 0) m_charW = 9;
 
@@ -564,7 +564,7 @@ Rect MainWindow::dropItemRect(int mi, int ii) const
 }
 Rect MainWindow::toolBtnRect(int i) const
 {
-    settextstyle(13, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
     Rect t = rTool();
     int x = 8;
     for (int k = 0; k <= i && k < (int)m_tools.size(); k++)
@@ -585,7 +585,7 @@ MainWindow::FindLayout MainWindow::findLayout() const
     L.bar = bar;
     int x = 10, y = bar.y1 + 5, hh = bar.h() - 10;
 
-    settextstyle(14, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(14), 0, _T("Microsoft YaHei"));
     drawStr(x, y + 3, "查找:"); x += 46;
     L.fInput = Rect(x, y, x + 170, y + hh); x += 178;
     drawStr(x, y + 3, "替换:"); x += 46;
@@ -725,7 +725,7 @@ void MainWindow::onMouseDown(int x, int y)
     if (rBottom().hit(x, y))
     {
         Rect tb = rBottomTabs();
-        settextstyle(13, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
         int bx = tb.x1 + 8;
         for (int i = 0; i < 2; i++)
         {
@@ -1172,7 +1172,7 @@ void MainWindow::drawMenuBar()
     setlinecolor(th->border);
     line(0, r.y2, m_w, r.y2);
 
-    settextstyle(14, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(14), 0, _T("Microsoft YaHei"));
     for (int i = 0; i < (int)m_menus.size(); i++)
     {
         Rect t(i * UI_MENU_TITLE_W, r.y1, (i + 1) * UI_MENU_TITLE_W, r.y2);
@@ -1196,7 +1196,7 @@ void MainWindow::drawDropdown()
     line(d.x1 + 8, d.y1, d.x2 - 8, d.y1);
     line(d.x1 + 8, d.y2, d.x2 - 8, d.y2);
 
-    settextstyle(14, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(14), 0, _T("Microsoft YaHei"));
     for (int i = 0; i < (int)m_menus[m_openMenu].items.size(); i++)
     {
         const MenuItem& it = m_menus[m_openMenu].items[i];
@@ -1221,7 +1221,7 @@ void MainWindow::drawToolbar()
     setlinecolor(th->border);
     line(0, t.y2, m_w, t.y2);
 
-    settextstyle(13, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
     int x = 8;
     for (int i = 0; i < (int)m_tools.size(); i++)
     {
@@ -1302,7 +1302,7 @@ void MainWindow::drawEditor()
 
             // 行号
             settextcolor(i == crow ? th->text : th->gutterText);
-            settextstyle(12, 0, _T("Consolas"));
+            settextstyle(uiFont(12), 0, _T("Consolas"));
             std::string num = itos(i + 1);
             int nw = strWidth(num);
             drawStr(g.x2 - 10 - nw, y + 4, num);
@@ -1319,7 +1319,7 @@ void MainWindow::drawEditor()
             }
 
             // 代码
-            settextstyle(UI_FONT_H, 0, _T("Consolas"));
+            settextstyle(uiFont(UI_FONT_H), 0, _T("Consolas"));
             drawCodeLine(t.x1 + 6, y, i, t, inBlock);
             // 把块注释状态传递到下一行
             {
@@ -1350,7 +1350,7 @@ void MainWindow::drawEditor()
     if (m_compiling)
     {
         settextcolor(th->accent);
-        settextstyle(15, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(15), 0, _T("Microsoft YaHei"));
         drawStr(t.x1 + 12, t.y1 + 8, "正在编译，请稍候...");
     }
 }
@@ -1449,7 +1449,7 @@ void MainWindow::drawFindBar()
     setlinecolor(th->border);
     line(bar.x1, bar.y2, bar.x2, bar.y2);
 
-    settextstyle(14, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(14), 0, _T("Microsoft YaHei"));
 
     // 输入框
     fillRectB(L.fInput, th->panel, (m_focus == FOCUS_FIND) ? th->accent : th->border);
@@ -1512,7 +1512,7 @@ void MainWindow::drawBottom()
     setlinecolor(th->border);
     line(tb.x1, tb.y2, tb.x2, tb.y2);
 
-    settextstyle(13, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
 
     int x = tb.x1 + 8;
     for (int i = 0; i < 2; i++)
@@ -1550,13 +1550,13 @@ void MainWindow::drawDiagnostics()
     if (m_diagnostics.empty())
     {
         settextcolor(th->dim);
-        settextstyle(14, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(14), 0, _T("Microsoft YaHei"));
         drawStr(body.x1 + 14, body.y1 + 12, "暂无诊断信息。按 F7 编译后，错误与警告会显示在这里，点击条目可跳转到源码对应行。");
         return;
     }
 
     ClipGuard cg(body);
-    settextstyle(13, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
     for (int i = m_diagTop; i < (int)m_diagnostics.size(); i++)
     {
         int y = body.y1 + 4 + (i - m_diagTop) * 22;
@@ -1591,7 +1591,7 @@ void MainWindow::drawConsole()
     {
         ClipGuard cg(body);
         setbkmode(TRANSPARENT);
-        settextstyle(14, 0, _T("Consolas"));
+        settextstyle(uiFont(14), 0, _T("Consolas"));
         for (int i = m_consoleTop; i < (int)m_console.size(); i++)
         {
             int y = body.y1 + (i - m_consoleTop) * lh;
@@ -1604,7 +1604,7 @@ void MainWindow::drawConsole()
     // ---- 输入行 ----
     Rect in = rConsoleInput();
     fillRect(in, mixColor(th->outBg, th->accent, 0.10));
-    settextstyle(14, 0, _T("Consolas"));
+    settextstyle(uiFont(14), 0, _T("Consolas"));
     settextcolor(th->outPrompt);
     drawStr(in.x1 + 6, in.y1 + 4, ">");
     settextcolor(th->outText);
@@ -1619,7 +1619,7 @@ void MainWindow::drawConsole()
     if (m_progRunning)
     {
         settextcolor(th->warn);
-        settextstyle(13, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
         std::string s = "  程序运行中... 在此输入后回车可发送给程序";
         int w = strWidth(s);
         drawStr(in.x2 - w - 10, in.y1 + 4, s);
@@ -1634,7 +1634,7 @@ void MainWindow::drawStatusBar()
     line(0, r.y1, m_w, r.y1);
 
     CoreApi& api = CoreApi::inst();
-    settextstyle(13, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
     setbkmode(TRANSPARENT);
 
     // 左：文件路径 + 脏标记

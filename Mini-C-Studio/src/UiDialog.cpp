@@ -48,7 +48,7 @@ DlgRet uiMessageBox(int winW, int winH, const Theme& th,
     std::vector<std::string> lines = splitLines(text);
 
     // ---- 计算对话框尺寸 ----
-    settextstyle(15, 0, _T("Microsoft YaHei"));
+    settextstyle(uiFont(15), 0, _T("Microsoft YaHei"));
     int maxTw = strWidth(title);
     for (size_t i = 0; i < lines.size(); i++)
         if (strWidth(lines[i]) > maxTw) maxTw = strWidth(lines[i]);
@@ -115,12 +115,12 @@ DlgRet uiMessageBox(int winW, int winH, const Theme& th,
 
         // 标题
         settextcolor(th.text);
-        settextstyle(16, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(16), 0, _T("Microsoft YaHei"));
         drawStr(dlg.x1 + 24, dlg.y1 + 22, title);
 
         // 正文
         settextcolor(th.dim);
-        settextstyle(15, 0, _T("Microsoft YaHei"));
+        settextstyle(uiFont(15), 0, _T("Microsoft YaHei"));
         for (size_t i = 0; i < lines.size(); i++)
             drawStr(dlg.x1 + 24, dlg.y1 + 56 + (int)i * 22, lines[i]);
 
@@ -135,7 +135,7 @@ DlgRet uiMessageBox(int winW, int winH, const Theme& th,
             bool primary = (i == (int)btns.size() - 1);
             fillRoundRect(b, 6, primary ? th.accent : (hv ? th.btnHover : th.btn));
             settextcolor(primary ? RGB(255, 255, 255) : th.btnText);
-            settextstyle(15, 0, _T("Microsoft YaHei"));
+            settextstyle(uiFont(15), 0, _T("Microsoft YaHei"));
             drawStrCenter(b, btns[i].text);
         }
 

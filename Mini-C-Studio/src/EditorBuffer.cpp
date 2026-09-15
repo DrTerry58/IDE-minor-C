@@ -1,11 +1,7 @@
-﻿// ============================================================================
-//  EditorBuffer.cpp
-//  文本缓冲区模块实现（C++11，不含任何 GUI 依赖）
-// ============================================================================
-
 #include "EditorBuffer.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace
 {
@@ -52,6 +48,18 @@ namespace
         }
         return i;
     }
+
+    // 判断是否超时。timeoutMs <= 0 表示不限时。
+    bool timeoutExpired(const std::chrono::steady_clock::time_point& start,
+                        int timeoutMs)
+    {
+        if (timeoutMs <= 0)
+        {
+            return false;
+        }
+        return std::chrono::steady_clock::now() - start
+               >= std::chrono::milliseconds(timeoutMs);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -69,7 +77,8 @@ EditorBuffer::EditorBuffer()
       undoStack(),
       redoStack(),
       suppressUndo(false),
-      mergeRow(-1)
+      mergeRow(-1),
+      lastOperationTimedOut_(false)
 {
     lines.push_back(std::string());
 }
@@ -490,6 +499,7 @@ void EditorBuffer::loadFromString(const std::string& content)
     suppressUndo = false;
     mergeRow = -1;
     dirty = false;
+    lastOperationTimedOut_ = false;
     clampCursor();
 }
 
@@ -791,16 +801,34 @@ bool EditorBuffer::canRedo() const
 }
 
 // ============================================================================
-//  加分项：括号配对与代码折叠
+//  加分项：括号配对与代码折叠（含超时检测）
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// 查找 (posX, posY) 处括号的配对括号。
-// 左括号向后扫描、右括号向前扫描，用深度计数找到同层的配对括号。
-// 只统计同类型括号的深度，不识别字符串和注释中的括号
+// 查找 (posX, posY) 处括号的配对括号（无超时版本）。
+// 内部调用带超时版本，timeoutMs = 0 表示不限时。
 // ----------------------------------------------------------------------------
-bool EditorBuffer::findMatchingBracket(int posX, int posY, int& outX, int& outY) const
+bool EditorBuffer::findMatchingBracket(int posX, int posY,
+                                       int& outX, int& outY) const
 {
+    return findMatchingBracket(posX, posY, outX, outY, 0);
+}
+
+// ----------------------------------------------------------------------------
+// 查找 (posX, posY) 处括号的配对括号（带超时版本）。
+// 左括号向后扫描、右括号向前扫描，用深度计数找到同层的配对括号。
+// 只统计同类型括号的深度，不识别字符串和注释中的括号。
+// timeoutMs <= 0 表示不限时。
+// 返回 true 表示找到配对；返回 false 时可用 lastOperationTimedOut() 判断是否超时。
+// ----------------------------------------------------------------------------
+bool EditorBuffer::findMatchingBracket(int posX, int posY,
+                                       int& outX, int& outY,
+                                       int timeoutMs) const
+{
+    lastOperationTimedOut_ = false;
+    const std::chrono::steady_clock::time_point start =
+        std::chrono::steady_clock::now();
+
     if (!isValidRow(posY))
     {
         return false;
@@ -824,10 +852,24 @@ bool EditorBuffer::findMatchingBracket(int posX, int posY, int& outX, int& outY)
         // 向后（下方 / 右方）扫描
         for (int row = posY; row < static_cast<int>(lines.size()); ++row)
         {
+            if (timeoutExpired(start, timeoutMs))
+            {
+                lastOperationTimedOut_ = true;
+                return false;
+            }
+
             const std::string& line = lines[row];
             const int startCol = (row == posY) ? posX : 0;
             for (int col = startCol; col < static_cast<int>(line.size()); ++col)
             {
+                // 每 1024 列检查一次超时，避免频繁调用 now()
+                if ((col - startCol) % 1024 == 0
+                    && timeoutExpired(start, timeoutMs))
+                {
+                    lastOperationTimedOut_ = true;
+                    return false;
+                }
+
                 const char c = line[col];
                 if (c == here)
                 {
@@ -851,10 +893,25 @@ bool EditorBuffer::findMatchingBracket(int posX, int posY, int& outX, int& outY)
         // 向前（上方 / 左方）扫描
         for (int row = posY; row >= 0; --row)
         {
+            if (timeoutExpired(start, timeoutMs))
+            {
+                lastOperationTimedOut_ = true;
+                return false;
+            }
+
             const std::string& line = lines[row];
-            const int startCol = (row == posY) ? posX : static_cast<int>(line.size()) - 1;
+            const int startCol = (row == posY)
+                                 ? posX
+                                 : static_cast<int>(line.size()) - 1;
             for (int col = startCol; col >= 0; --col)
             {
+                if ((startCol - col) % 1024 == 0
+                    && timeoutExpired(start, timeoutMs))
+                {
+                    lastOperationTimedOut_ = true;
+                    return false;
+                }
+
                 const char c = line[col];
                 if (c == here)
                 {
@@ -874,29 +931,62 @@ bool EditorBuffer::findMatchingBracket(int posX, int posY, int& outX, int& outY)
         }
     }
 
-    return false;  // 括号不匹配
+    return false;  // 括号不匹配（未超时）
 }
 
 // ----------------------------------------------------------------------------
-// 返回所有可折叠区域，每项为 (起始行号, 结束行号)，以 '{' 与 '}' 配对为依据，
-// 只返回跨越多行的区域。扫描时跳过 // 注释、/* */ 注释、字符串和字符常量，
-// 避免把注释或字符串里的花括号当成代码块
+// 返回所有可折叠区域（无超时版本）。
+// 内部调用带超时版本，timeoutMs = 0 表示不限时。
 // ----------------------------------------------------------------------------
 std::vector<std::pair<int, int> > EditorBuffer::getFoldableRegions() const
 {
     std::vector<std::pair<int, int> > regions;
+    getFoldableRegions(0, regions);
+    return regions;
+}
+
+// ----------------------------------------------------------------------------
+// 返回所有可折叠区域（带超时版本）。
+// 每项为 (起始行号, 结束行号)，以 '{' 与 '}' 配对为依据，只返回跨越多行的区域。
+// 扫描时跳过 // 注释、/* */ 注释、字符串和字符常量。
+// timeoutMs <= 0 表示不限时。
+// 返回 true 表示扫描完成；返回 false 表示超时，此时 outRegions 中可能保留部分结果。
+// ----------------------------------------------------------------------------
+bool EditorBuffer::getFoldableRegions(
+    int timeoutMs,
+    std::vector<std::pair<int, int> >& outRegions) const
+{
+    lastOperationTimedOut_ = false;
+    outRegions.clear();
+
+    const std::chrono::steady_clock::time_point start =
+        std::chrono::steady_clock::now();
+
     std::vector<int> stack;       // 存放尚未闭合的 '{' 所在行号
 
     bool inBlockComment = false;  // 是否处于 /* */ 之中（可跨行）
 
     for (int row = 0; row < static_cast<int>(lines.size()); ++row)
     {
+        if (timeoutExpired(start, timeoutMs))
+        {
+            lastOperationTimedOut_ = true;
+            return false;
+        }
+
         const std::string& line = lines[row];
         bool inString = false;    // 是否处于 "..." 之中
         bool inChar = false;      // 是否处于 '...' 之中
 
         for (size_t col = 0; col < line.size(); ++col)
         {
+            // 每 1024 列检查一次超时
+            if ((col & 0x3FF) == 0 && timeoutExpired(start, timeoutMs))
+            {
+                lastOperationTimedOut_ = true;
+                return false;
+            }
+
             const char c = line[col];
 
             if (inBlockComment)
@@ -969,7 +1059,7 @@ std::vector<std::pair<int, int> > EditorBuffer::getFoldableRegions() const
                     stack.pop_back();
                     if (row > startRow)    // 只收跨行的区域，单行 {} 不折叠
                     {
-                        regions.push_back(std::make_pair(startRow, row));
+                        outRegions.push_back(std::make_pair(startRow, row));
                     }
                 }
                 // 多余的 '}' 直接忽略，保证不崩溃
@@ -978,6 +1068,14 @@ std::vector<std::pair<int, int> > EditorBuffer::getFoldableRegions() const
     }
 
     // 按起始行号升序排列，方便界面同学顺序绘制折叠标记
-    std::sort(regions.begin(), regions.end());
-    return regions;
+    std::sort(outRegions.begin(), outRegions.end());
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// 最近一次带超时操作是否因超时而中止
+// ----------------------------------------------------------------------------
+bool EditorBuffer::lastOperationTimedOut() const
+{
+    return lastOperationTimedOut_;
 }

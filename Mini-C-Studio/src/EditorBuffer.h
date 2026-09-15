@@ -1,24 +1,10 @@
-﻿// ============================================================================
-//  EditorBuffer.h
-//  C 语言集成开发环境 —— 文本缓冲区模块（B 同学负责）
-//
-//  说明：
-//    1. 本模块是编辑器的数据核心，不含任何界面代码，可独立编译。
-//    2. 不包含任何 GUI 头文件，不依赖其他小组成员的模块。
-//    3. C++11 标准。
-//
-//  与组长 UML 的两点差异（已尽量保持对外接口不变）：
-//    - UML 中数据成员名为 isDirty，但方法也叫 isDirty()，C++ 中同名会编译失败。
-//      故成员改名为 dirty，对外的 isDirty() / setDirty() 接口不变。
-//    - 选中区域、撤销/重做需要额外的私有状态，UML 未列出，见 private 段。
-// ============================================================================
-
 #ifndef EDITOR_BUFFER_H
 #define EDITOR_BUFFER_H
 
 #include <string>
 #include <vector>
 #include <utility>
+#include <chrono>
 
 class EditorBuffer
 {
@@ -108,7 +94,8 @@ public:
     bool hasSelection() const;
 
     // 取规范化后的选区起点/终点坐标（写入四个 out 参数；无选中返回 false 且不改参数）
-    bool getSelectionRange(int& outStartX, int& outStartY, int& outEndX, int& outEndY) const;
+    bool getSelectionRange(int& outStartX, int& outStartY,
+                           int& outEndX, int& outEndY) const;
 
     // 取选中的文本；跨行时行间用 '\n' 连接；无选中返回空串
     std::string getSelectedText() const;
@@ -141,9 +128,25 @@ public:
     // 注意：只做简单的深度计数，不识别字符串和注释里的括号
     bool findMatchingBracket(int posX, int posY, int& outX, int& outY) const;
 
+    // 新增：带超时版本的括号匹配。
+    // timeoutMs <= 0 表示不限时。
+    // 返回值同原函数：true 表示找到配对括号。
+    // 如果返回 false，可用 lastOperationTimedOut() 区分“没找到”还是“超时”。
+    bool findMatchingBracket(int posX, int posY, int& outX, int& outY,
+                             int timeoutMs) const;
+
     // 返回所有可折叠区域，每项为 (起始行号, 结束行号)，以 '{' 与 '}' 配对为依据，
     // 只返回跨越多行的区域。扫描时会跳过 // 注释、/* */ 注释、字符串和字符常量
     std::vector<std::pair<int, int> > getFoldableRegions() const;
+
+    // 新增：带超时版本的可折叠区域扫描。
+    // 返回 true 表示扫描完成；返回 false 表示超时。
+    // 超时时 outRegions 中可能保留已经扫描到的部分区域。
+    bool getFoldableRegions(int timeoutMs,
+                            std::vector<std::pair<int, int> >& outRegions) const;
+
+    // 最近一次带超时操作是否因超时而中止
+    bool lastOperationTimedOut() const;
 
 private:
     // ---------------- 数据成员（UML 规定部分） ----------------
@@ -175,6 +178,10 @@ private:
     // 撤销合并：记录上一次编辑操作，连续字符输入合并成一个撤销单元。
     // mergeRow 记录上一段连续输入的所在行；同一行上连续 insertChar 视为一个单元
     int mergeRow;                    // 上一次连续输入所在的行号，-1 表示无连续输入
+
+    // 最近一次带超时操作是否超时。
+    // 因为 const 成员函数里也要写它，所以用 mutable。
+    mutable bool lastOperationTimedOut_;
 
     // ---------------- 私有辅助函数 ----------------
 

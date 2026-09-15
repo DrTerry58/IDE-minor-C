@@ -35,7 +35,13 @@ public:
         // 编译运行
         CMD_COMPILE, CMD_RUN, CMD_COMPILE_RUN, CMD_STOP,
         // 视图 / 帮助
-        CMD_THEME, CMD_ABOUT
+        CMD_THEME, CMD_ABOUT,
+        // 内置 AI 助手
+        CMD_AI_TOGGLE,      // 显示/隐藏 AI 面板
+        CMD_AI_SEND,        // 发送输入框内容
+        CMD_AI_EXPLAIN,     // 解释选中代码
+        CMD_AI_FIX,         // 用 AI 修复当前错误
+        CMD_AI_CLEAR        // 清空对话
     };
 
     MainWindow();
@@ -48,13 +54,19 @@ public:
 
 private:
     // ---------------- 焦点区域 ----------------
-    enum Focus { FOCUS_EDITOR = 0, FOCUS_FIND, FOCUS_REPLACE, FOCUS_CONSOLE };
+    enum Focus { FOCUS_EDITOR = 0, FOCUS_FIND, FOCUS_REPLACE, FOCUS_CONSOLE, FOCUS_AI };
 
     // ---------------- 菜单结构 ----------------
     struct MenuItem { std::string label; int cmd; std::string hot; };
     struct MenuDef  { std::string title; std::vector<MenuItem> items; };
     struct ToolBtn  { std::string label; int cmd; };
     struct FindLayout { Rect bar, fInput, rInput, chk, bPrev, bNext, bRep, bRepAll, bClose; };
+
+    // AI 面板布局（绘制与命中测试共用）
+    struct AILayout {
+        Rect panel, title, chat, scroll,
+             input, bSend, bExplain, bFix, bClear;
+    };
 
     // ---------------- 窗口与主题 ----------------
     int  m_w, m_h;
@@ -99,6 +111,11 @@ private:
     std::string m_inputLine;             // 控制台输入行
     bool m_progRunning;
 
+    // ---------------- 内置 AI 助手面板状态 ----------------
+    bool        m_showAI;       // 是否显示 AI 面板
+    std::string m_aiInput;      // AI 输入框当前文本
+    int         m_aiScroll;     // 对话区滚动偏移（行）
+
     // ---------------- 查找 / 替换 ----------------
     bool m_findVisible;
     std::string m_findText, m_replaceText;
@@ -134,6 +151,8 @@ private:
     Rect rBottomScroll()const;
     Rect rConsoleBody() const;
     Rect rConsoleInput()const;
+    Rect rAI()   const;             // AI 面板整体矩形（显示时编辑器右侧）
+    AILayout aiLayout() const;      // AI 面板内部各控件坐标
     Rect dropRect(int mi) const;
     Rect dropItemRect(int mi, int ii) const;
     Rect toolBtnRect(int i) const;
@@ -163,6 +182,7 @@ private:
     void drawDiagnostics();
     void drawConsole();
     void drawStatusBar();
+    void drawAIPanel();             // 内置 AI 助手右侧面板
     void drawScrollbar(const Rect& r, int pos, int total, int page, bool vertical);
 
     // ================= 命令与业务 =================

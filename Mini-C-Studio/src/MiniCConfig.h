@@ -48,6 +48,12 @@ inline int uiFont(int baseSize) { return (int)(baseSize * UI_FONT_SCALE + 0.5f);
 #define UI_DROP_ITEM_H      26       // 菜单项高度
 #define UI_DROP_W           210      // 菜单下拉宽度
 
+// ---- 内置 AI 助手右侧面板（2026-09-15 新增） ----
+#define UI_AI_W             340      // AI 面板宽度
+#define UI_AI_INPUT_H       36       // AI 输入行高度
+#define UI_AI_BTN_H         30       // AI 按钮高度
+#define UI_AI_LINE_H        22       // AI 对话每行高度
+
 // ============================================================================
 //  主题配色（70-20-10 原则：主色大面积 / 次色面板 / 点缀色按钮与高亮）
 // ============================================================================

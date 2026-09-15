@@ -64,4 +64,13 @@ enum RunState
     RS_TIMEOUT = 4    // 超时
 };
 
+// ---------------- AI 对话消息（C 与 D 的 AIClient 之间的契约） ----------------
+struct AIMessage
+{
+    std::string role;     // "user" / "assistant" / "system"
+    std::string content;  // 消息文本
+    AIMessage() {}
+    AIMessage(const std::string& r, const std::string& c) : role(r), content(c) {}
+};
+
 #endif // MINIC_CORETYPES_H

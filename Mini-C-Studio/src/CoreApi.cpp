@@ -37,6 +37,9 @@
 #include "Runtime.h"
 #endif
 
+// 注意：AIClient 由 D 负责、由 B 在 CoreApi 中接入（见下方「AI 助手」小节 TODO(B)）。
+//       C 的 GUI 不直接 #include "AIClient.h"，只通过 CoreApi 门面调用，故此处不引入。
+
 #include "MiniStub.h"
 
 // ---------- 统一类型别名：一行切换实现 ----------
@@ -69,6 +72,7 @@ static BufferImpl   g_buffer;
 static FileMgrImpl  g_fileMgr;
 static CompilerImpl g_compiler;
 static RuntimeImpl  g_runtime;
+// 注：AIClient 实例（static AIClient g_ai;）由 B 在接入 AI 时添加，C 不在此声明。
 
 CoreApi& CoreApi::inst()
 {
@@ -205,3 +209,55 @@ bool CoreApi::runPoll(std::string& out, int& code, bool& fin)   { return g_runti
 void CoreApi::runSendInput(const std::string& line)             { g_runtime.sendInput(line); }
 void CoreApi::runStop()                                         { g_runtime.stop(); }
 bool CoreApi::runIsRunning()                                    { return g_runtime.isRunning(); }
+
+// ============================================================================
+//  AI 助手（C 负责的 GUI 门面接口；具体实现由 B 同学接入）
+//  分工：
+//   - C（GUI）：声明接口 + 实现 aiHistory()/aiClearHistory()（供面板渲染/清空）；
+//             本文件中的 aiAsk/aiExplainCode/aiFixError/aiAvailable 仅为占位，
+//             待 B 同学在 CoreApi 中接入 AIClient 后替换。
+//   - B：在 CoreApi 加入 #include "AIClient.h" 与 static AIClient g_ai;，
+//        实现下列四个方法（调用 g_ai.sendMessage、拼提示词、把 user/assistant
+//        消息写入 m_aiHistory 维护多轮上下文）。
+//   - D：提供 AIClient（sendMessage / isConfigured）。
+//  m_aiHistory 为对话显示模型：B 的 aiAsk 负责写入，UI 通过 aiHistory() 读取。
+// ============================================================================
+bool CoreApi::aiAvailable() const
+{
+    // TODO(B): 接入 AIClient 后改为 return g_ai.isConfigured();
+    return false;   // 占位：B 未接入前一律视为不可用
+}
+
+std::string CoreApi::aiAsk(const std::string& prompt)
+{
+    // TODO(B): 取消下方注释并实现（需 #include "AIClient.h"、static AIClient g_ai;）：
+    //   if (prompt.empty()) return std::string();
+    //   m_aiHistory.push_back(AIMessage("user", prompt));
+    //   std::string reply = g_ai.sendMessage(prompt);
+    //   m_aiHistory.push_back(AIMessage("assistant", reply));
+    //   return reply;
+    (void)prompt;
+    return "（AI 调用逻辑待 B 同学接入 CoreApi::aiAsk —— 详见各组员对接文档）";
+}
+
+std::string CoreApi::aiExplainCode(const std::string& code)
+{
+    // TODO(B): 拼“解释代码”提示词后调用 aiAsk(...)；当前占位，直接转发原始代码。
+    return aiAsk(code);
+}
+
+std::string CoreApi::aiFixError(const std::string& code, const std::string& diag)
+{
+    // TODO(B): 拼“根据诊断修复错误”提示词后调用 aiAsk(...)；当前占位。
+    return aiAsk(code + "\n[diag]:" + diag);
+}
+
+const std::vector<AIMessage>& CoreApi::aiHistory() const
+{
+    return m_aiHistory;
+}
+
+void CoreApi::aiClearHistory()
+{
+    m_aiHistory.clear();
+}

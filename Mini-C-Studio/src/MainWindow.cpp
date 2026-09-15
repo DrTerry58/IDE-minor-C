@@ -233,7 +233,8 @@ MainWindow::MainWindow()
       m_findVisible(false), m_caseSensitive(false),
       m_hasMatch(false), m_matchR(0), m_matchC(0), m_matchLen(0),
       m_compileState(CS_NONE), m_compiling(false),
-      m_statusMsg("就绪"), m_statusColor(themeLight().dim)
+      m_statusMsg("就绪"), m_statusColor(themeLight().dim),
+      m_showAI(false), m_aiInput(""), m_aiScroll(0)
 {
     buildMenus();
 }
@@ -293,6 +294,7 @@ void MainWindow::imeCommit(const std::string& gbk)
     if      (m_focus == FOCUS_FIND)    { m_findText    += gbk; return; }
     else if (m_focus == FOCUS_REPLACE) { m_replaceText += gbk; return; }
     else if (m_focus == FOCUS_CONSOLE) { m_inputLine   += gbk; return; }
+    else if (m_focus == FOCUS_AI)      { m_aiInput     += gbk; return; }
 
     // 编辑器
     if (m_selActive) deleteSelection();
@@ -362,6 +364,7 @@ void MainWindow::buildMenus()
 
     m.title = "视图(V)"; m.items.clear();
     m.items.push_back(MenuItem{ "切换亮/暗主题", CMD_THEME,      "Ctrl+T" });
+    m.items.push_back(MenuItem{ "AI 助手",       CMD_AI_TOGGLE,  "Ctrl+Shift+A" });
     m_menus.push_back(m);
 
     m.title = "帮助(H)"; m.items.clear();
@@ -390,6 +393,7 @@ void MainWindow::buildMenus()
     m_tools.push_back(ToolBtn{ "",         CMD_NONE });
     m_tools.push_back(ToolBtn{ "主题",     CMD_THEME });
     m_tools.push_back(ToolBtn{ "关于",     CMD_ABOUT });
+    m_tools.push_back(ToolBtn{ "AI",       CMD_AI_TOGGLE });
 }
 
 // ============================================================================
@@ -489,8 +493,19 @@ void MainWindow::update()
 // ============================================================================
 Rect MainWindow::rMenu()   const { return Rect(0, 0, m_w, UI_MENU_H); }
 Rect MainWindow::rTool()   const { return Rect(0, UI_MENU_H, m_w, UI_MENU_H + UI_TOOL_H); }
-Rect MainWindow::rEdit()   const { return Rect(0, UI_MENU_H + UI_TOOL_H, m_w, m_h - UI_STATUS_H - UI_BOTTOM_H); }
-Rect MainWindow::rBottom() const { return Rect(0, m_h - UI_STATUS_H - UI_BOTTOM_H, m_w, m_h - UI_STATUS_H); }
+Rect MainWindow::rEdit()   const
+{
+    int right = m_w;
+    if (m_showAI) right -= UI_AI_W;   // AI 面板占右侧
+    return Rect(0, UI_MENU_H + UI_TOOL_H, right, m_h - UI_STATUS_H - UI_BOTTOM_H);
+}
+Rect MainWindow::rBottom() const
+{
+    int right = m_w;
+    if (m_showAI) right -= UI_AI_W;   // 底部面板在 AI 面板左侧
+    return Rect(0, m_h - UI_STATUS_H - UI_BOTTOM_H, right, m_h - UI_STATUS_H);
+}
+Rect MainWindow::rAI()   const { return Rect(m_w - UI_AI_W, UI_MENU_H + UI_TOOL_H, m_w, m_h - UI_STATUS_H); }
 Rect MainWindow::rStatus() const { return Rect(0, m_h - UI_STATUS_H, m_w, m_h); }
 Rect MainWindow::rGutter() const { Rect e = rEdit(); return Rect(e.x1, e.y1, e.x1 + UI_GUTTER_W, e.y2); }
 Rect MainWindow::rText()   const
@@ -549,6 +564,26 @@ Rect MainWindow::rConsoleBody()  const
     return Rect(b.x1, b.y1, b.x2, (m_bottomTab == 1) ? b.y2 - UI_CONSOLE_INPUT_H : b.y2);
 }
 Rect MainWindow::rConsoleInput() const { Rect b = rBottom(); return Rect(b.x1 + 1, b.y2 - UI_CONSOLE_INPUT_H, b.x2 - 1, b.y2 - 1); }
+
+MainWindow::AILayout MainWindow::aiLayout() const
+{
+    Rect panel = rAI();
+    AILayout L;
+    L.panel = panel;
+    L.title = Rect(panel.x1, panel.y1, panel.x2, panel.y1 + 30);
+    int chatH = panel.h() - 30 - UI_AI_INPUT_H - UI_AI_BTN_H * 2 - 18;
+    if (chatH < 60) chatH = 60;
+    L.chat  = Rect(panel.x1 + 1, L.title.y2, panel.x2 - 1, panel.y1 + 30 + chatH);
+    L.input = Rect(panel.x1 + 6, panel.y2 - UI_AI_INPUT_H - 4, panel.x2 - 6, panel.y2 - 4);
+    int by = L.input.y1 - UI_AI_BTN_H - 6;
+    int bw = (panel.w() - 24) / 2;
+    L.bExplain = Rect(panel.x1 + 6,      by, panel.x1 + 6 + bw,      by + UI_AI_BTN_H);
+    L.bFix     = Rect(panel.x1 + 12 + bw, by, panel.x1 + 12 + 2*bw,  by + UI_AI_BTN_H);
+    L.bSend    = Rect(panel.x1 + 6,      by - UI_AI_BTN_H - 6, panel.x1 + 6 + bw,      by - 6);
+    L.bClear   = Rect(panel.x1 + 12 + bw, by - UI_AI_BTN_H - 6, panel.x1 + 12 + 2*bw,  by - 6);
+    L.scroll   = Rect(panel.x2 - UI_SCROLL_W, L.chat.y1, panel.x2, L.chat.y2);
+    return L;
+}
 
 Rect MainWindow::dropRect(int mi) const
 {
@@ -781,6 +816,19 @@ void MainWindow::onMouseDown(int x, int y)
         return;
     }
 
+    // ---------- 5.5 AI 助手面板 ----------
+    if (m_showAI && rAI().hit(x, y))
+    {
+        AILayout L = aiLayout();
+        if (L.input.hit(x, y))   { m_focus = FOCUS_AI; return; }
+        if (L.bSend.hit(x, y))   { execCmd(CMD_AI_SEND);    return; }
+        if (L.bExplain.hit(x, y)){ execCmd(CMD_AI_EXPLAIN); return; }
+        if (L.bFix.hit(x, y))    { execCmd(CMD_AI_FIX);     return; }
+        if (L.bClear.hit(x, y))  { execCmd(CMD_AI_CLEAR);   return; }
+        if (L.chat.hit(x, y))    { m_focus = FOCUS_AI; return; }
+        return;
+    }
+
     // ---------- 6. 编辑区滚动条 ----------
     if (rVScroll().hit(x, y))
     {
@@ -972,7 +1020,7 @@ void MainWindow::onKeyDown(int vk, bool ctrl, bool shift, bool alt)
         case 'S': execCmd(shift ? CMD_FILE_SAVEAS : CMD_FILE_SAVE); return;
         case 'Z': execCmd(shift ? CMD_EDIT_REDO : CMD_EDIT_UNDO); clearSelection(); scrollToCursor(); return;
         case 'Y': execCmd(CMD_EDIT_REDO);  clearSelection(); scrollToCursor(); return;
-        case 'A': execCmd(CMD_EDIT_SELALL);return;
+        case 'A': if (shift) execCmd(CMD_AI_TOGGLE); else execCmd(CMD_EDIT_SELALL); return;
         case 'C': execCmd(CMD_EDIT_COPY);  return;
         case 'X': execCmd(CMD_EDIT_CUT);   scrollToCursor(); return;
         case 'V': execCmd(CMD_EDIT_PASTE); scrollToCursor(); return;
@@ -993,6 +1041,7 @@ void MainWindow::onKeyDown(int vk, bool ctrl, bool shift, bool alt)
     if (vk == VK_ESCAPE)
     {
         if (m_findVisible) { m_findVisible = false; m_focus = FOCUS_EDITOR; return; }
+        if (m_focus == FOCUS_AI) { m_focus = FOCUS_EDITOR; return; }
         if (m_selActive)   { clearSelection(); return; }
         return;
     }
@@ -1036,6 +1085,21 @@ void MainWindow::onKeyDown(int vk, bool ctrl, bool shift, bool alt)
             return;
         }
         return;
+    }
+
+    // ---------- AI 输入框 ----------
+    if (m_focus == FOCUS_AI)
+    {
+        if (vk == VK_RETURN) { execCmd(CMD_AI_SEND); return; }
+        if (vk == VK_TAB)    { m_focus = FOCUS_EDITOR; return; }
+        if (vk == VK_ESCAPE) { m_focus = FOCUS_EDITOR; return; }
+        if (vk == VK_BACK && !m_aiInput.empty())
+        {
+            int st = charStartBefore(m_aiInput, (int)m_aiInput.size());
+            m_aiInput.erase(st);
+            return;
+        }
+        return;   // 其余交给 WM_CHAR
     }
 
     // ---------- 编辑器 ----------
@@ -1138,6 +1202,7 @@ void MainWindow::onCharInput(unsigned int code)
     if (m_focus == FOCUS_FIND)         { m_findText += bytes; return; }
     if (m_focus == FOCUS_REPLACE)      { m_replaceText += bytes; return; }
     if (m_focus == FOCUS_CONSOLE)      { m_inputLine += bytes; return; }
+    if (m_focus == FOCUS_AI)           { m_aiInput += bytes; return; }
 
     // 编辑器
     if (m_selActive) deleteSelection();
@@ -1155,6 +1220,7 @@ void MainWindow::render()
     cleardevice();
 
     drawEditor();
+    if (m_showAI) drawAIPanel();
     if (m_findVisible) drawFindBar();
     drawBottom();
     drawToolbar();
@@ -1709,6 +1775,110 @@ void MainWindow::drawScrollbar(const Rect& r, int pos, int total, int page, bool
 // ============================================================================
 //  命令分发
 // ============================================================================
+// ============================================================================
+//  内置 AI 助手面板（C 负责绘制与交互；AI 回答来自 CoreApi::aiHistory()）
+// ============================================================================
+void MainWindow::drawAIPanel()
+{
+    CoreApi& api = CoreApi::inst();
+    AILayout L = aiLayout();
+
+    fillRectB(L.panel, th->panel, th->border);
+
+    // 标题栏
+    settextstyle(uiFont(15), 0, _T("Microsoft YaHei"));
+    settextcolor(th->text);
+    drawStr(L.title.x1 + 10, L.title.y1 + 5, "AI 助手");
+    settextcolor(th->dim);
+    std::string hint = "Ctrl+Shift+A 开关";
+    drawStr(L.title.x2 - 10 - strWidth(hint), L.title.y1 + 6, hint);
+
+    // 对话区
+    {
+        const std::vector<AIMessage>& h = api.aiHistory();
+        ClipGuard cg(L.chat);
+        settextstyle(uiFont(13), 0, _T("Microsoft YaHei"));
+        int y = L.chat.y1 + 6 - m_aiScroll * UI_AI_LINE_H;
+        int right = L.chat.x2 - 8;
+        for (size_t i = 0; i < h.size(); i++)
+        {
+            bool user = (h[i].role == "user");
+            std::string text = (user ? "你: " : "AI: ") + h[i].content;
+            std::string line;
+            int lx = L.chat.x1 + 8;
+            for (size_t j = 0; j < text.size(); )
+            {
+                int nb = charBytes((unsigned char)text[j]);
+                std::string ch = text.substr(j, nb);
+                if (text[j] == '\n' || strWidth(line + ch) > (L.chat.w() - 16))
+                {
+                    int bx = user ? (right - strWidth(line)) : lx;
+                    settextcolor(user ? th->accent : th->text);
+                    drawStr(bx, y, line);
+                    y += UI_AI_LINE_H;
+                    line.clear();
+                    if (text[j] == '\n') { j += nb; continue; }
+                }
+                else line += ch;
+                j += nb;
+            }
+            if (!line.empty())
+            {
+                int bx = user ? (right - strWidth(line)) : lx;
+                settextcolor(user ? th->accent : th->text);
+                drawStr(bx, y, line);
+                y += UI_AI_LINE_H;
+            }
+        }
+        if (h.empty())
+        {
+            settextcolor(th->dim);
+            drawStr(L.chat.x1 + 8, L.chat.y1 + 6, "（对话为空）输入问题后点“发送”，");
+            drawStr(L.chat.x1 + 8, L.chat.y1 + 6 + UI_AI_LINE_H, "或选中代码用“解释选中 / 修复错误”。");
+        }
+        if (!api.aiAvailable())
+        {
+            settextcolor(th->warn);
+            drawStr(L.chat.x1 + 8, L.chat.y2 - UI_AI_LINE_H, "AI 调用逻辑待 B 同学接入 CoreApi（占位模式）");
+        }
+    }
+
+    // 输入行
+    {
+        Rect in = L.input;
+        fillRect(in, th->bg);
+        setlinecolor(th->border);
+        rectangle(in.x1, in.y1, in.x2, in.y2);
+        settextstyle(uiFont(14), 0, _T("Microsoft YaHei"));
+        settextcolor(th->text);
+        std::string shown = m_aiInput;
+        while (!shown.empty() && strWidth(shown) > in.w() - 16)
+            shown = shown.substr(charLenAt(shown, 0));
+        drawStr(in.x1 + 8, in.y1 + (in.h() - UI_FONT_H) / 2, shown);
+        if (m_focus == FOCUS_AI && (m_tick / 30) % 2 == 0)
+        {
+            int cx = in.x1 + 8 + strWidth(shown);
+            setlinecolor(th->text);
+            line(cx, in.y1 + 6, cx, in.y2 - 6);
+        }
+    }
+
+    // 按钮
+    auto drawBtn = [&](const Rect& b, const std::string& label){
+        bool hv = b.hit(m_mouseX, m_mouseY);
+        fillRoundRect(b, 5, hv ? th->btnHover : th->btn);
+        setlinecolor(th->btnBorder);
+        line(b.x1 + 5, b.y1, b.x2 - 5, b.y1);
+        line(b.x1 + 5, b.y2, b.x2 - 5, b.y2);
+        settextcolor(th->btnText);
+        drawStrCenter(b, label);
+    };
+    drawBtn(L.bExplain, "解释选中");
+    drawBtn(L.bFix,    "修复错误");
+    drawBtn(L.bSend,   "发送");
+    drawBtn(L.bClear,  "清空");
+}
+
 void MainWindow::execCmd(int cmd)
 {
     CoreApi& api = CoreApi::inst();
@@ -1813,6 +1983,55 @@ void MainWindow::execCmd(int cmd)
                 "  E  文件生命周期管理\n\n"
                 "快捷键：Ctrl+N/O/S  F7 编译  F5 运行  Ctrl+F 查找  Ctrl+T 换主题");
         break;
+    // ---------------- 内置 AI 助手 ----------------
+    case CMD_AI_TOGGLE:
+        m_showAI = !m_showAI;
+        m_focus = m_showAI ? FOCUS_AI : FOCUS_EDITOR;
+        setStatus(m_showAI ? "AI 助手已打开" : "AI 助手已关闭");
+        break;
+    case CMD_AI_SEND:
+    {
+        std::string p = m_aiInput;
+        m_aiInput.clear();
+        if (!p.empty())
+        {
+            CoreApi::inst().aiAsk(p);
+            m_aiScroll = 0;
+        }
+        m_focus = FOCUS_AI;
+        break;
+    }
+    case CMD_AI_EXPLAIN:
+    {
+        std::string code = hasSelection() ? selectedText() : api.bufSave();
+        if (code.empty()) { setStatus("没有可解释的代码", th->warn); break; }
+        CoreApi::inst().aiExplainCode(code);
+        m_showAI = true; m_focus = FOCUS_AI; m_aiScroll = 0;
+        setStatus("已向 AI 发送：解释代码", th->ok);
+        break;
+    }
+    case CMD_AI_FIX:
+    {
+        std::string code = hasSelection() ? selectedText() : api.bufSave();
+        if (code.empty()) { setStatus("没有可发送的代码", th->warn); break; }
+        std::string diag;
+        if (!m_diagnostics.empty())
+        {
+            const Diagnostic& d = m_diagnostics[0];
+            std::string tag = d.tag.empty() ? "error" : d.tag;
+            diag = itos(d.line + 1) + ":" + itos(d.column + 1) + " " + tag + ": " + d.message;
+        }
+        CoreApi::inst().aiFixError(code, diag);
+        m_showAI = true; m_focus = FOCUS_AI; m_aiScroll = 0;
+        setStatus("已向 AI 发送：修复错误", th->ok);
+        break;
+    }
+    case CMD_AI_CLEAR:
+        CoreApi::inst().aiClearHistory();
+        m_aiInput.clear();
+        m_aiScroll = 0;
+        break;
+
     default:
         break;
     }

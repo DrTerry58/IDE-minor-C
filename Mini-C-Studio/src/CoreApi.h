@@ -69,12 +69,25 @@ public:
     void runStop();
     bool runIsRunning();
 
+    // ================= AI 助手（C 声明接口，B 负责实现） =================
+    // 分工：C 只声明下面这些门面函数并实现 aiHistory()/aiClearHistory()（供面板渲染）；
+    //       aiAsk/aiExplainCode/aiFixError/aiAvailable 的真实逻辑由 B 在 CoreApi 接入
+    //       AIClient 后实现（见 CoreApi.cpp 中 TODO(B)）。GUI 不直接 #include "AIClient.h"。
+    bool          aiAvailable() const;              // AI 是否可用（B 接入后返回 g_ai.isConfigured()）
+    std::string   aiAsk(const std::string& prompt); // 单轮问答，返回回复文本（B 实现）
+    std::string   aiExplainCode(const std::string& code);        // 解释代码（B 实现）
+    std::string   aiFixError(const std::string& code, const std::string& diag); // 根据诊断修复（B 实现）
+    const std::vector<AIMessage>& aiHistory() const; // 多轮对话上下文（UI 展示用，B 的 aiAsk 写入）
+    void          aiClearHistory();
+
 private:
     CoreApi() {}
     CoreApi(const CoreApi&);
     CoreApi& operator=(const CoreApi&);
 
     std::string m_lastError;   // 最近一次文件操作的错误原因（失败时写入，成功时清空）
+
+    std::vector<AIMessage> m_aiHistory;  // 多轮 AI 对话上下文（UI 展示用；由 B 的 aiAsk 写入）
 };
 
 #endif // MINIC_COREAPI_H

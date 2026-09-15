@@ -1,19 +1,8 @@
-﻿// ============================================================================
-//  EditorBuffer_test.cpp
-//  EditorBuffer 模块的单元测试（无 GUI 依赖，可独立编译运行）
-//
-//  编译：
-//    g++ -std=c++11 -Wall -Wextra EditorBuffer.cpp EditorBuffer_test.cpp -o eb_test
-//  运行：
-//    ./eb_test
-//  全部通过输出：=== ALL TESTS PASSED ===
-// ============================================================================
-
-// 2026-09-10 目录整改：本文件位于 tests/，源码在 ../src/
-#include "../src/EditorBuffer.h"
+#include "EditorBuffer.h"
 
 #include <iostream>
 #include <string>
+#include <vector>
 
 static int g_failed = 0;
 static int g_total = 0;
@@ -248,6 +237,37 @@ int main()
         check(b.getLineRef(0) == "hello", "getLineRef: 内容正确");
         check(b.getLineRef(99).empty(), "getLineRef: 越界返回空串");
         check(&b.getLineRef(0) == &b.getLineRef(0), "getLineRef: 返回引用");
+    }
+
+    // ---- 超时检测接口 ----
+    {
+        EditorBuffer b;
+
+        std::string big;
+        for (int i = 0; i < 5000; ++i)
+        {
+            big += "void f(){\n}\n";
+        }
+        b.loadFromString(big);
+
+        std::vector<std::pair<int, int> > regions;
+
+        // timeoutMs = 0 表示不限时，应正常完成
+        bool done = b.getFoldableRegions(0, regions);
+        check(done && !b.lastOperationTimedOut(),
+              "timeout: getFoldableRegions(0) 不限时不超时");
+
+        int x = 0;
+        int y = 0;
+        bool found = b.findMatchingBracket(0, 0, x, y, 0);
+        check(found || !b.lastOperationTimedOut(),
+              "timeout: findMatchingBracket(0) 不限时不报超时");
+
+        // 极小超时只验证“要么完成，要么报告超时”，不强制一定超时
+        std::vector<std::pair<int, int> > regions2;
+        bool finished = b.getFoldableRegions(1, regions2);
+        check(finished || b.lastOperationTimedOut(),
+              "timeout: 1ms 要么完成要么报告超时");
     }
 
     // ---- 大批量输入性能（2000 行不多于可感知时间）----

@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // 文件名：CoreApi.cpp
 // 职责：门面层实现 —— 决定使用占位实现还是队友的真实实现
 //
@@ -211,7 +211,7 @@ bool CoreApi::runIsRunning()                                    { return g_runti
 // 查询 AI 是否可用。AIClient 通过环境变量 DEEPSEEK_API_KEY 判断配置状态。
 // 未配置时返回 false，GUI 面板显示占位模式提示。
 // ----------------------------------------------------------------------------
-bool CoreApi::aiAvailable()
+bool CoreApi::aiAvailable() const
 {
     return g_ai.isConfigured();
 }
@@ -247,16 +247,32 @@ std::string CoreApi::aiExplainCode(const std::string& code)
 
 // ----------------------------------------------------------------------------
 // 根据编译诊断修复错误：构造修复类提示词后转交 aiAsk。
-// diag.line / diag.column 为 0-based，提示词中转为 1-based 便于用户阅读。
+// diag 已由 GUI 格式化为 "行:列 级别: 描述"（见 MainWindow::execCmd 的 CMD_AI_FIX），
+// 此处按契约以 std::string 接收并直接嵌入提示词。
 // ----------------------------------------------------------------------------
-std::string CoreApi::aiFixError(const std::string& code, const Diagnostic& diag)
+std::string CoreApi::aiFixError(const std::string& code, const std::string& diag)
 {
     std::string prompt =
         "以下 C 语言代码编译出错了。\n"
-        "错误信息：第 " + std::to_string(diag.line + 1) +
-        " 行，第 " + std::to_string(diag.column + 1) +
-        " 列：" + diag.message + "\n\n"
+        "错误信息：\n" + diag + "\n\n"
         "代码：\n```c\n" + code + "\n```\n"
         "请给出修复建议，并指出可能出错的行。请用中文回答。";
     return aiAsk(prompt);
+}
+
+// ----------------------------------------------------------------------------
+// 多轮对话上下文：由 B 的 aiAsk 写入（每次追加 user / assistant 两条），
+// UI 通过本方法读取以渲染对话历史，请勿重复 push。
+// ----------------------------------------------------------------------------
+const std::vector<AIMessage>& CoreApi::aiHistory() const
+{
+    return m_aiHistory;
+}
+
+// ----------------------------------------------------------------------------
+// 清空对话历史（UI “清空”按钮调用）。
+// ----------------------------------------------------------------------------
+void CoreApi::aiClearHistory()
+{
+    m_aiHistory.clear();
 }

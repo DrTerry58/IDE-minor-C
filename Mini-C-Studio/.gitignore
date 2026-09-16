@@ -1,13 +1,57 @@
+# ===== Visual Studio 编译输出 =====
 x64/
 Debug/
 Release/
+.vs/
 *.exe
 *.obj
 *.pdb
 *.ilk
 *.log
+*.tlog
+*.idb
+*.exp
+*.lib
+*.res
+*.aps
+*.ncb
+*.sdf
+*.suo
+*.user
+*.opensdf
+*.cachefile
+
+# ===== 临时文件 =====
 temp.c
 temp.exe
 error.txt
 output.txt
-.vs/
+minic_compile.log
+minic_stdin.txt
+minic_stdout.txt
+*.tmp
+*.bak
+
+# ===== API Key / 敏感信息 =====
+config.ini
+.env
+*.key
+apikey.txt
+secrets.h
+
+# ===== 测试生成文件 =====
+test_*.c
+test_*.exe
+FileManager_test.exe
+EditorBuffer_test.exe
+AIClient_test.exe
+
+# ===== 系统文件 =====
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ===== 文档临时文件 =====
+~$*.docx
+~$*.pptx
+~$*.xlsx

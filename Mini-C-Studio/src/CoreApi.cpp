@@ -1,29 +1,26 @@
-﻿// ============================================================================
+// ============================================================================
 // 文件名：CoreApi.cpp
-// 职责：门面层的实现 —— 在这里决定"用占位实现"还是"用队友的真实实现"
+// 职责：门面层实现 —— 决定使用占位实现还是队友的真实实现
 //
-// 【对接步骤（给组长 A 看）】
-//   1. B 同学把 EditorBuffer.h/.cpp 放进工程（已实现，方法名与 MiniStub.h 中
-//      MiniBuffer 大体一致；少数 MiniBuffer 有而 EditorBuffer 没有的函数，
-//      由 C 的 EditorExt 桥接层用 B 的现有原语组合，无需 B 额外补函数）；
-//   2. 把下面的 USE_B_REAL_BUFFER 改成 1，并 include "EditorExt.h"
-//      （EditorExt.h 内含 EditorBuffer.h，并提供桥接函数）；
-//   3. E / D 同理。
-//   4. 注意：真实类的成员函数签名若与 MiniBuffer 不完全一致，由 EditorExt 在
-//      桥接层适配，GUI / CoreApi 门面一行都不用改 —— 这正是"接口契约 + 桥接层"的设计。
+// 对接说明：
+//   1. 文本缓冲区、文件管理、编译调度、运行时托管均已接入真实实现；
+//   2. 未实现的模块可由宏开关切回 MiniStub 占位版本；
+//   3. GUI 仅通过 CoreApi 访问底层模块，切换实现无需修改界面代码。
 // ============================================================================
 
 #include "CoreApi.h"
 
-// ============================ 对接开关 ============================
-#define USE_B_REAL_BUFFER    1    // B 同学：自研文本缓冲区 EditorBuffer（已接入并编译验证通过）
-#define USE_E_REAL_FILEMGR   1    // E 同学：文件管理 FileManager（已交付并接入）
-#define USE_D_REAL_COMPILER  1    // D 同学：编译调度 Compiler（2026-09-11 已按契约改造为类成员函数，已接入）
-#define USE_D_REAL_RUNTIME   1    // D 同学：运行时托管 Runtime（2026-09-11 新交付，异步轮询，已接入）
+#include "AIClient.h"   // AI 客户端接口
 
-// ---------- 队友真实实现的头文件（改宏为 1 后取消注释） ----------
+// ============================ 对接开关 ============================
+#define USE_B_REAL_BUFFER    1    // 文本缓冲区：EditorBuffer
+#define USE_E_REAL_FILEMGR   1    // 文件管理：FileManager
+#define USE_D_REAL_COMPILER  1    // 编译调度：Compiler
+#define USE_D_REAL_RUNTIME   1    // 运行时托管：Runtime
+
+// ---------- 队友真实实现的头文件 ----------
 #if USE_B_REAL_BUFFER
-// EditorExt.h 内含 EditorBuffer.h，并提供 C 侧的桥接函数
+// EditorExt.h 内含 EditorBuffer.h，并提供桥接函数
 // （bufInsertAt / bufDeleteRange / bufClear / bufGotoLine / bufSetCursor 等）
 #include "EditorExt.h"
 #endif
@@ -36,9 +33,6 @@
 #if USE_D_REAL_RUNTIME
 #include "Runtime.h"
 #endif
-
-// 注意：AIClient 由 D 负责、由 B 在 CoreApi 中接入（见下方「AI 助手」小节 TODO(B)）。
-//       C 的 GUI 不直接 #include "AIClient.h"，只通过 CoreApi 门面调用，故此处不引入。
 
 #include "MiniStub.h"
 
@@ -67,12 +61,13 @@ typedef Runtime        RuntimeImpl;
 typedef MiniRuntime    RuntimeImpl;
 #endif
 
-// ---------- 全局实例（GUI 只通过 CoreApi 访问它们） ----------
+// ---------- 全局实例（GUI 只通过 CoreApi 访问） ----------
 static BufferImpl   g_buffer;
 static FileMgrImpl  g_fileMgr;
 static CompilerImpl g_compiler;
 static RuntimeImpl  g_runtime;
-// 注：AIClient 实例（static AIClient g_ai;）由 B 在接入 AI 时添加，C 不在此声明。
+
+static AIClient     g_ai;       // AI 客户端实例
 
 CoreApi& CoreApi::inst()
 {
@@ -81,7 +76,7 @@ CoreApi& CoreApi::inst()
 }
 
 // ============================================================================
-//  B：文本缓冲区
+//  文本缓冲区
 // ============================================================================
 int         CoreApi::bufLineCount()                  { return g_buffer.getLineCount(); }
 std::string CoreApi::bufGetLine(int row)             { return g_buffer.getLine(row); }
@@ -103,8 +98,8 @@ bool        CoreApi::bufCanRedo()                    { return g_buffer.canRedo()
 void        CoreApi::bufLoad(const std::string& t)   { g_buffer.loadFromString(t); }
 std::string CoreApi::bufSave()                       { return g_buffer.saveToString(); }
 
-// 以下方法：真实缓冲区(EditorBuffer)无同名函数，或需要坐标转换，
-// 统一走 C 的 EditorExt 桥接层；占位实现(MiniBuffer)有同名函数则直接调。
+// 以下方法 EditorBuffer 无同名函数，或需坐标转换，统一走 EditorExt 桥接层；
+// 占位实现 MiniBuffer 有同名函数则直接调用。
 #if USE_B_REAL_BUFFER
 void CoreApi::bufInsertString(const std::string& s) { ::bufInsertString(&g_buffer, s); }
 void CoreApi::bufInsertAt(int r, int c, const std::string& s) { ::bufInsertAt(&g_buffer, r, c, s); }
@@ -112,7 +107,7 @@ void CoreApi::bufDeleteRange(int r1,int c1,int r2,int c2)     { ::bufDeleteRange
 std::string CoreApi::bufGetRange(int r1,int c1,int r2,int c2) { return ::bufRangeText(&g_buffer, r1, c1, r2, c2); }
 void CoreApi::bufClear()                             { ::bufClear(&g_buffer); }
 void CoreApi::bufGotoLine(int row)                   { ::bufGotoLine(&g_buffer, row); }
-// bufSetCursor 必须走桥接层处理 (列,行) 顺序，不能直调 B::setCursor(row,col) 以免行列颠倒
+// bufSetCursor 需经桥接层处理 (列,行) 顺序，避免行列颠倒
 void CoreApi::bufSetCursor(int row, int col)         { ::bufSetCursor(&g_buffer, row, col); }
 #else
 void CoreApi::bufInsertString(const std::string& s) { g_buffer.insertString(s); }
@@ -125,21 +120,20 @@ void CoreApi::bufSetCursor(int row, int col)         { g_buffer.setCursor(row, c
 #endif
 
 // ============================================================================
-//  E：文件生命周期
+//  文件生命周期
 // ============================================================================
 #if USE_E_REAL_FILEMGR
-// E 的真实 FileManager 按契约 3.2 交付：只管磁盘读写、不碰缓冲区，
-// 因此"磁盘 <-> 缓冲区"的转换由 C 在此桥接（契约第 4 节：适配由 C 侧完成）。
+// FileManager 只负责磁盘读写，不操作缓冲区；
+// "磁盘 <-> 缓冲区" 的转换在本层完成。
 //
-// ⚠ 换行约定：saveToString() 的输出必须【原样】交给 E 的 saveFile，
-//   E 写盘时自己把 \n 转成 \r\n、读盘时自己把 \r 去掉。
-//   C 侧若预先转换，会出现 \r\r\n 双重转换错误。
+// 换行约定：saveToString() 的输出原样交给 saveFile，
+// 由 FileManager 负责 \n 与 \r\n 的转换，此处不做预处理。
 
 bool CoreApi::fileNew()
 {
     m_lastError.clear();
     g_fileMgr.newFile();               // 磁盘上无操作，恒为 FILE_OK
-    g_buffer.loadFromString("");       // 清空编辑区（B 的缓冲区负责）
+    g_buffer.loadFromString("");       // 清空编辑区
     g_buffer.setFilePath("");
     g_buffer.setDirty(false);
     return true;
@@ -153,7 +147,7 @@ bool CoreApi::fileOpen(const std::string& path)
     if (e != FILE_OK)
     {
         m_lastError = FileManager::fileErrMsg(e);
-        return false;                  // 失败时缓冲区保持原样，不覆盖用户内容
+        return false;                  // 失败时保留原缓冲区内容，不覆盖用户数据
     }
     g_buffer.loadFromString(text);
     g_buffer.setFilePath(path);
@@ -188,11 +182,10 @@ const char* CoreApi::lastError() const               { return ""; }
 #endif
 
 // ============================================================================
-//  D：编译
+//  编译
 // ============================================================================
-// 测试钩子：设了环境变量 MINIC_FORCE_NO_COMPILER 就强制返回"未找到编译器"，
-// 便于本机装有 gcc 时仍能测到异常分支（详见测试流程文档 附录 A）。
-// 放在门面层，D 的 Compiler 代码不受影响。
+// 测试钩子：设置环境变量 MINIC_FORCE_NO_COMPILER 可强制返回"未找到编译器"，
+// 便于本机装有 gcc 时验证异常分支。该钩子仅作用于门面层，不影响 Compiler 内部。
 bool          CoreApi::compilerAvailable()
 {
     if (std::getenv("MINIC_FORCE_NO_COMPILER")) return false;
@@ -202,7 +195,7 @@ CompileResult CoreApi::compile(const std::string& srcPath) { return g_compiler.c
 std::string   CoreApi::exePathOf(const std::string& src)  { return g_compiler.exePathOf(src); }
 
 // ============================================================================
-//  D：运行
+//  运行
 // ============================================================================
 bool CoreApi::runStart(const std::string& exePath)              { return g_runtime.start(exePath); }
 bool CoreApi::runPoll(std::string& out, int& code, bool& fin)   { return g_runtime.poll(out, code, fin); }
@@ -211,53 +204,59 @@ void CoreApi::runStop()                                         { g_runtime.stop
 bool CoreApi::runIsRunning()                                    { return g_runtime.isRunning(); }
 
 // ============================================================================
-//  AI 助手（C 负责的 GUI 门面接口；具体实现由 B 同学接入）
-//  分工：
-//   - C（GUI）：声明接口 + 实现 aiHistory()/aiClearHistory()（供面板渲染/清空）；
-//             本文件中的 aiAsk/aiExplainCode/aiFixError/aiAvailable 仅为占位，
-//             待 B 同学在 CoreApi 中接入 AIClient 后替换。
-//   - B：在 CoreApi 加入 #include "AIClient.h" 与 static AIClient g_ai;，
-//        实现下列四个方法（调用 g_ai.sendMessage、拼提示词、把 user/assistant
-//        消息写入 m_aiHistory 维护多轮上下文）。
-//   - D：提供 AIClient（sendMessage / isConfigured）。
-//  m_aiHistory 为对话显示模型：B 的 aiAsk 负责写入，UI 通过 aiHistory() 读取。
+//  AI 助手
 // ============================================================================
-bool CoreApi::aiAvailable() const
+
+// ----------------------------------------------------------------------------
+// 查询 AI 是否可用。AIClient 通过环境变量 DEEPSEEK_API_KEY 判断配置状态。
+// 未配置时返回 false，GUI 面板显示占位模式提示。
+// ----------------------------------------------------------------------------
+bool CoreApi::aiAvailable()
 {
-    // TODO(B): 接入 AIClient 后改为 return g_ai.isConfigured();
-    return false;   // 占位：B 未接入前一律视为不可用
+    return g_ai.isConfigured();
 }
 
+// ----------------------------------------------------------------------------
+// 发送提问。将 user / assistant 两条消息追加到 m_aiHistory，
+// 供 GUI 面板读取以显示多轮对话。
+// ----------------------------------------------------------------------------
 std::string CoreApi::aiAsk(const std::string& prompt)
 {
-    // TODO(B): 取消下方注释并实现（需 #include "AIClient.h"、static AIClient g_ai;）：
-    //   if (prompt.empty()) return std::string();
-    //   m_aiHistory.push_back(AIMessage("user", prompt));
-    //   std::string reply = g_ai.sendMessage(prompt);
-    //   m_aiHistory.push_back(AIMessage("assistant", reply));
-    //   return reply;
-    (void)prompt;
-    return "（AI 调用逻辑待 B 同学接入 CoreApi::aiAsk —— 详见各组员对接文档）";
+    if (prompt.empty())
+    {
+        return std::string();
+    }
+
+    m_aiHistory.push_back(AIMessage("user", prompt));
+    std::string reply = g_ai.sendMessage(prompt);
+    m_aiHistory.push_back(AIMessage("assistant", reply));
+    return reply;
 }
 
+// ----------------------------------------------------------------------------
+// 解释选中代码：构造解释类提示词后转交 aiAsk。
+// ----------------------------------------------------------------------------
 std::string CoreApi::aiExplainCode(const std::string& code)
 {
-    // TODO(B): 拼“解释代码”提示词后调用 aiAsk(...)；当前占位，直接转发原始代码。
-    return aiAsk(code);
+    std::string prompt =
+        "请解释以下 C 语言代码的功能和逻辑：\n"
+        "```c\n" + code + "\n```\n"
+        "请用中文回答，尽量简洁。";
+    return aiAsk(prompt);
 }
 
-std::string CoreApi::aiFixError(const std::string& code, const std::string& diag)
+// ----------------------------------------------------------------------------
+// 根据编译诊断修复错误：构造修复类提示词后转交 aiAsk。
+// diag.line / diag.column 为 0-based，提示词中转为 1-based 便于用户阅读。
+// ----------------------------------------------------------------------------
+std::string CoreApi::aiFixError(const std::string& code, const Diagnostic& diag)
 {
-    // TODO(B): 拼“根据诊断修复错误”提示词后调用 aiAsk(...)；当前占位。
-    return aiAsk(code + "\n[diag]:" + diag);
-}
-
-const std::vector<AIMessage>& CoreApi::aiHistory() const
-{
-    return m_aiHistory;
-}
-
-void CoreApi::aiClearHistory()
-{
-    m_aiHistory.clear();
+    std::string prompt =
+        "以下 C 语言代码编译出错了。\n"
+        "错误信息：第 " + std::to_string(diag.line + 1) +
+        " 行，第 " + std::to_string(diag.column + 1) +
+        " 列：" + diag.message + "\n\n"
+        "代码：\n```c\n" + code + "\n```\n"
+        "请给出修复建议，并指出可能出错的行。请用中文回答。";
+    return aiAsk(prompt);
 }

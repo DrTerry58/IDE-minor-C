@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // 文件名：CoreApi.cpp
 // 职责：门面层实现 —— 决定使用占位实现还是队友的真实实现
 //
@@ -11,6 +11,49 @@
 #include "CoreApi.h"
 
 #include "AIClient.h"   // AI 客户端接口
+
+#include <windows.h>    // UTF-8 → GBK 转换所需
+
+// ----------------------------------------------------------------------------
+// AIClient::sendMessage 返回 UTF-8 字符串，EasyX 面板按 GBK 渲染，
+// 因此在写入 m_aiHistory 前统一转为 GBK，避免面板显示乱码。
+// 转换失败时返回原字符串，保证调用方不会拿到空串。
+// ----------------------------------------------------------------------------
+namespace
+{
+    std::string utf8ToGbk(const std::string& utf8)
+    {
+        if (utf8.empty())
+        {
+            return utf8;
+        }
+
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(),
+                                       static_cast<int>(utf8.size()),
+                                       NULL, 0);
+        if (wlen <= 0)
+        {
+            return utf8;
+        }
+
+        std::wstring wstr(static_cast<size_t>(wlen), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(),
+                            static_cast<int>(utf8.size()),
+                            &wstr[0], wlen);
+
+        int glen = WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), wlen,
+                                       NULL, 0, NULL, NULL);
+        if (glen <= 0)
+        {
+            return utf8;
+        }
+
+        std::string gbk(static_cast<size_t>(glen), '\0');
+        WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), wlen,
+                            &gbk[0], glen, NULL, NULL);
+        return gbk;
+    }
+}
 
 // ============================ 对接开关 ============================
 #define USE_B_REAL_BUFFER    1    // 文本缓冲区：EditorBuffer
@@ -219,6 +262,7 @@ bool CoreApi::aiAvailable() const
 // ----------------------------------------------------------------------------
 // 发送提问。将 user / assistant 两条消息追加到 m_aiHistory，
 // 供 GUI 面板读取以显示多轮对话。
+// sendMessage 返回 UTF-8，此处转为 GBK 后再写入历史，避免面板乱码。
 // ----------------------------------------------------------------------------
 std::string CoreApi::aiAsk(const std::string& prompt)
 {
@@ -228,7 +272,7 @@ std::string CoreApi::aiAsk(const std::string& prompt)
     }
 
     m_aiHistory.push_back(AIMessage("user", prompt));
-    std::string reply = g_ai.sendMessage(prompt);
+    std::string reply = utf8ToGbk(g_ai.sendMessage(prompt));
     m_aiHistory.push_back(AIMessage("assistant", reply));
     return reply;
 }
@@ -261,7 +305,7 @@ std::string CoreApi::aiFixError(const std::string& code, const std::string& diag
 }
 
 // ----------------------------------------------------------------------------
-// 多轮对话上下文：由 B 的 aiAsk 写入（每次追加 user / assistant 两条），
+// 多轮对话上下文：由 aiAsk 写入（每次追加 user / assistant 两条），
 // UI 通过本方法读取以渲染对话历史，请勿重复 push。
 // ----------------------------------------------------------------------------
 const std::vector<AIMessage>& CoreApi::aiHistory() const

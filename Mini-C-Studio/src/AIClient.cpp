@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+﻿#define _CRT_SECURE_NO_WARNINGS
 
 // ============================================================
 // 文件名: AIClient.cpp
@@ -18,6 +18,12 @@
 
 #include "json.hpp"
 using json = nlohmann::json;
+
+// 兼容宏：部分较旧的 MinGW winhttp.h 未定义 TLS1.2 标志，
+// MSVC / 新版 Windows SDK 已自带，这里只在缺失时补定义，不影响 MSVC 行为。
+#ifndef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2
+#define WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 0x0800
+#endif
 
 static std::wstring utf8ToWide(const std::string& str) {
     if (str.empty()) return L"";

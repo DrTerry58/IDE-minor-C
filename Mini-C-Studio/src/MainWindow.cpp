@@ -1836,11 +1836,6 @@ void MainWindow::drawAIPanel()
             drawStr(L.chat.x1 + 8, L.chat.y1 + 6, "（对话为空）输入问题后点“发送”，");
             drawStr(L.chat.x1 + 8, L.chat.y1 + 6 + UI_AI_LINE_H, "或选中代码用“解释选中 / 修复错误”。");
         }
-        if (!api.aiAvailable())
-        {
-            settextcolor(th->warn);
-            drawStr(L.chat.x1 + 8, L.chat.y2 - UI_AI_LINE_H, "AI 调用逻辑待 B 同学接入 CoreApi（占位模式）");
-        }
     }
 
     // 输入行

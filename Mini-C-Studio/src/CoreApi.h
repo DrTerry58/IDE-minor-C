@@ -69,10 +69,9 @@ public:
     void runStop();
     bool runIsRunning();
 
-    // ================= AI 助手（C 声明接口，B 负责实现） =================
-    // 分工：C 只声明下面这些门面函数并实现 aiHistory()/aiClearHistory()（供面板渲染）；
-    //       aiAsk/aiExplainCode/aiFixError/aiAvailable 的真实逻辑由 B 在 CoreApi 接入
-    //       AIClient 后实现（见 CoreApi.cpp 中 TODO(B)）。GUI 不直接 #include "AIClient.h"。
+    // ================= AI 助手（CoreApi 门面，D 提供 AIClient） =================
+    // 说明：aiAsk/aiExplainCode/aiFixError/aiAvailable 已由 B 在 CoreApi.cpp 中接入 AIClient
+    //       实现；GUI 只通过 CoreApi 调用，不直接 #include "AIClient.h"。
     bool          aiAvailable() const;              // AI 是否可用（B 接入后返回 g_ai.isConfigured()）
     std::string   aiAsk(const std::string& prompt); // 单轮问答，返回回复文本（B 实现）
     std::string   aiExplainCode(const std::string& code);        // 解释代码（B 实现）

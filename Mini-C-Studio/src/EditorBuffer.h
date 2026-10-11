@@ -1,4 +1,4 @@
-#ifndef EDITOR_BUFFER_H
+﻿#ifndef EDITOR_BUFFER_H
 #define EDITOR_BUFFER_H
 
 #include <string>

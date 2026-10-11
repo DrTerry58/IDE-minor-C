@@ -1,4 +1,4 @@
-#include "EditorBuffer.h"
+﻿#include "EditorBuffer.h"
 
 #include <algorithm>
 #include <chrono>

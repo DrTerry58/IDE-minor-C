@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{7E6D9E9A-4B4E-43C3-BBD2-25A0B8216167}</ProjectGuid>
+    <RootNamespace>MiniCStudio</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)x64\Debug\</OutDir>
+    <IntDir>$(ProjectDir)x64\Debug\obj\</IntDir>
+    <TargetName>Mini-C-Studio</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)x64\Release\</OutDir>
+    <IntDir>$(ProjectDir)x64\Release\obj\</IntDir>
+    <TargetName>Mini-C-Studio</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <DisableSpecificWarnings>4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(VCInstallDir)Auxiliary\VS\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <AdditionalLibraryDirectories>$(VCInstallDir)Auxiliary\VS\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>EasyXa.lib;winhttp.lib;ws2_32.lib;imm32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\AIClient.cpp" />
+    <ClCompile Include="src\Compiler.cpp" />
+    <ClCompile Include="src\CoreApi.cpp" />
+    <ClCompile Include="src\EditorBuffer.cpp" />
+    <ClCompile Include="src\EditorExt.cpp" />
+    <ClCompile Include="src\FileManager.cpp" />
+    <ClCompile Include="src\MainWindow.cpp" />
+    <ClCompile Include="src\Runtime.cpp" />
+    <ClCompile Include="src\SplashScreen.cpp" />
+    <ClCompile Include="src\UiDialog.cpp" />
+    <ClCompile Include="src\main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\AIClient.h" />
+    <ClInclude Include="src\Compiler.h" />
+    <ClInclude Include="src\CoreApi.h" />
+    <ClInclude Include="src\CoreTypes.h" />
+    <ClInclude Include="src\EditorBuffer.h" />
+    <ClInclude Include="src\EditorExt.h" />
+    <ClInclude Include="src\FileManager.h" />
+    <ClInclude Include="src\MainWindow.h" />
+    <ClInclude Include="src\MiniCConfig.h" />
+    <ClInclude Include="src\MiniStub.h" />
+    <ClInclude Include="src\Runtime.h" />
+    <ClInclude Include="src\SplashScreen.h" />
+    <ClInclude Include="src\UiDialog.h" />
+    <ClInclude Include="src\json.hpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

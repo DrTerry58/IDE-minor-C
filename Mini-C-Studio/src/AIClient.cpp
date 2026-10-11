@@ -53,12 +53,19 @@ std::string AIClient::sendMessage(const std::string& prompt) {
         return m_lastError;
     }
 
-    // 1. 构造 JSON 请求体
-    json req;
-    req["model"] = "deepseek-chat";
-    req["messages"] = json::array();
-    req["messages"].push_back({ {"role", "user"}, {"content", prompt} });
-    std::string body = req.dump();
+    // 1. 构造 JSON 请求体；JSON 字符串必须是 UTF-8。
+    std::string body;
+    try {
+        json req;
+        req["model"] = "deepseek-chat";
+        req["messages"] = json::array();
+        req["messages"].push_back({ {"role", "user"}, {"content", prompt} });
+        body = req.dump();
+    }
+    catch (const std::exception& e) {
+        m_lastError = "JSON request error: " + std::string(e.what());
+        return m_lastError;
+    }
 
     // 2. 初始化 WinHTTP
     HINTERNET hSession = WinHttpOpen(L"Mini-C-Studio/1.0",

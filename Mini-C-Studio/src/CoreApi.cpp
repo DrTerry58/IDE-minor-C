@@ -21,6 +21,42 @@
 // ----------------------------------------------------------------------------
 namespace
 {
+    bool gbkToUtf8(const std::string& gbk, std::string& utf8)
+    {
+        if (gbk.empty())
+        {
+            utf8.clear();
+            return true;
+        }
+
+        int wlen = MultiByteToWideChar(CP_ACP, 0, gbk.c_str(),
+                                       static_cast<int>(gbk.size()),
+                                       NULL, 0);
+        if (wlen <= 0)
+        {
+            return false;
+        }
+
+        std::wstring wstr(static_cast<size_t>(wlen), L'\0');
+        if (MultiByteToWideChar(CP_ACP, 0, gbk.c_str(),
+                                static_cast<int>(gbk.size()),
+                                &wstr[0], wlen) != wlen)
+        {
+            return false;
+        }
+
+        int utf8Length = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), wlen,
+                                             NULL, 0, NULL, NULL);
+        if (utf8Length <= 0)
+        {
+            return false;
+        }
+
+        utf8.resize(static_cast<size_t>(utf8Length));
+        return WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), wlen,
+                                   &utf8[0], utf8Length, NULL, NULL) == utf8Length;
+    }
+
     std::string utf8ToGbk(const std::string& utf8)
     {
         if (utf8.empty())
@@ -271,7 +307,16 @@ std::string CoreApi::aiAsk(const std::string& prompt)
     }
 
     m_aiHistory.push_back(AIMessage("user", prompt));
-    std::string reply = utf8ToGbk(g_ai.sendMessage(prompt));
+    std::string utf8Prompt;
+    std::string reply;
+    if (gbkToUtf8(prompt, utf8Prompt))
+    {
+        reply = utf8ToGbk(g_ai.sendMessage(utf8Prompt));
+    }
+    else
+    {
+        reply = "AI request failed: prompt encoding conversion failed.";
+    }
     m_aiHistory.push_back(AIMessage("assistant", reply));
     return reply;
 }

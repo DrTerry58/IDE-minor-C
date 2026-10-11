@@ -1,11 +1,5 @@
 ﻿#define _CRT_SECURE_NO_WARNINGS
 
-// ============================================================
-// 文件名: AIClient.cpp
-// 职责: DeepSeek AI 客户端实现（WinHTTP）
-// 负责人: D 同学
-// ============================================================
-
 #include "AIClient.h"
 #include <windows.h>
 #include <winhttp.h>
